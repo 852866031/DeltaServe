@@ -34,6 +34,11 @@ def get_lora_config_finetune():
 
 def get_lora_config(lora_dir, dummy):
     if dummy:
+        # Prefer reading adapter_config.json from the directory if present
+        config_path = os.path.join(lora_dir, "adapter_config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                return json.load(f), lora_dir
         return get_lora_config_json(lora_dir), lora_dir
     else:
         lora_dir = re.sub(r'-(\d+)$', '', lora_dir)

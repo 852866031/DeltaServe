@@ -1,6 +1,6 @@
 {
-  "finetuning_data_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/emotion_1000.csv",
-  "finetuning_lora_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora-ft",
+  "finetuning_data_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/config/emotion_1000.csv",
+  "finetuning_lora_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora-ft",
   "finetuning_type": "SFT",
   "finetuning_prepare_size": 999999,
   "num_epochs": 4,

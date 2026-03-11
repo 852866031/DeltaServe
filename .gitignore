@@ -6,3 +6,7 @@
 *.png
 S-LoRA/test/llama3/adapters/llama3-toy-lora/*
 S-LoRA/test/llama3/adapters/llama3-toy-lora-ft/*
+
+# training artifacts
+adapters/**/checkpoint-*/
+*.pt

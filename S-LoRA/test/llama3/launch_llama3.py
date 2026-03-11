@@ -10,10 +10,10 @@ CONFIG = {
     "online": {
         "base_model": "meta-llama/Meta-Llama-3-8B",
         "adapter_dirs": [
-            "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
+            "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
         ],
-        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
-        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
+        "finetuning_config_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
+        "no_finetuning_config_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
     },
 
     "defaults": {
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable-finetuning", action="store_true")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--ft_log_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
+    parser.add_argument("--ft_log_path", type=str, default="/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
 
     args = parser.parse_args()
 

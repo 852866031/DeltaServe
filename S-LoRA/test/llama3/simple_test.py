@@ -21,7 +21,7 @@ import aiohttp
 
 DEFAULTS = {
     "server": "http://localhost:9000",
-    "timeline_csv": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv",
+    "timeline_csv": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/timeline_live.csv",
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,
@@ -190,7 +190,7 @@ async def main() -> None:
 
     # These should match what your server expects; override if needed
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
-    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
+    ap.add_argument("--lora_dir", default="/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
     #yzdnaufan/Llama-3-8b-Alpaca-Lora
     # wait params
     ap.add_argument("--max_wait_s", type=float, default=240.0)

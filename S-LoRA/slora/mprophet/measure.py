@@ -36,6 +36,16 @@ class ModelProphet:
                     # layer norm
                     m.hidden_size * 4)
             return size
+        elif "mixtral" in self.name.lower() or "mistral" in self.name.lower():
+            num_experts = getattr(m, "num_local_experts", 8)
+            size = dbytes * (
+                    # self-attention (GQA: Q+K+V+O projections)
+                    m.hidden_size ** 2 * 4 +
+                    # MoE FFN: num_experts * 3 weight matrices (w1, w2, w3)
+                    num_experts * m.hidden_size * m.ffn_embed_dim * 3 +
+                    # MoE gate + layer norms
+                    m.hidden_size * (num_experts + 4))
+            return size
         else:
             raise NotImplementedError
 

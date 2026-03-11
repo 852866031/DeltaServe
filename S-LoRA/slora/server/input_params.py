@@ -97,6 +97,8 @@ class InputParams:
         tokenizer_mode,
         trust_remote_code=True,
         finetuning_config = {},
+        # expert parallelism
+        use_ep=False,
     ) -> None:
         self.max_req_total_len = max_req_total_len
         self.max_total_token_num = max_total_token_num
@@ -124,6 +126,8 @@ class InputParams:
         self.bmm = bmm
         self.no_lora = no_lora
         
+        self.use_ep = use_ep
+
         self.finetuning_params = FinetuneParams(
             model_weightdir=model_weightdir,
             tokenizor_mode=tokenizer_mode,

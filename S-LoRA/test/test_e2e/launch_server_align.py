@@ -5,12 +5,12 @@ import os
 base_model = "huggyllama/llama-7b"
 #adapter_dirs = ["tloen/alpaca-lora-7b"]
 adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
-finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
-finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_config_alignment.json"
+finetuning_lora_dir = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
+finetuning_config_path = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/finetuning_config_alignment.json"
 
 half_model = True
 enable_unified_mem_manager = True
-mem_manager_log_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/mem_manager_log.text"
+mem_manager_log_path = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/mem_manager_log.text"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

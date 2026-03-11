@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(which uv:*)",
+      "Bash(apt list:*)",
+      "Bash(uv python:*)",
+      "Bash(cd /mnt/nfs/home/ramya/slora-plus && uv venv --python 3.9 .venv 2>&1)",
+      "Bash(cd /mnt/nfs/home/ramya/slora-plus && uv venv --python 3.9 --clear .venv 2>&1)",
+      "Bash(uv pip:*)",
+      "Bash(.venv/bin/python S-LoRA/test/llama3/adapter_train.py 2>&1)",
+      "Read(//mnt/nfs/home/ramya/slora-plus/BEGIN { indent=0 }\n{\n    depth = gsub\\(/\\\\/, \"/\", $0\\)\n    for \\(i=0; i<depth; i++\\) printf \"  \"\n    gsub\\(/.*\\\\/**)",
+      "Bash(bash /tmp/find_structure.sh)",
+      "Read(//home/prabhu/.cache/huggingface/hub/models--mistralai--Mixtral-8x7B-v0.1/snapshots/**)",
+      "Bash(/dev/null find:*)",
+      "Bash(.venv/bin/python -m slora.server.api_server --help 2>&1 | head -5)",
+      "Bash(pstree -p 130858 2>/dev/null || ps --ppid 130858 --no-header)",
+      "Bash(kill -9 137105 2)",
+      "Bash(/dev/null ps:*)",
+      "Bash(xargs kill:*)",
+      "Bash(/dev/null sleep:*)",
+      "Bash(nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null)",
+      "Bash(python /tmp/test_mixtral.py 2>&1)",
+      "Read(//mnt/nfs/home/ramya/**)",
+      "Bash(huggingface-cli whoami:*)"
+    ]
+  }
+}

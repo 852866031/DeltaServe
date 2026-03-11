@@ -100,16 +100,20 @@ class ModelConfig:
 
 
     def _init_from_dict(self, config):
-        if "llama" in self.name.lower():
+        model_type = config.get("model_type", "")
+        name_lower = self.name.lower()
+        if "llama" in name_lower or model_type in ("llama", "mistral", "mixtral"):
             if "max_sequence_length" in config:
                 self.max_seq_len = config["max_sequence_length"]
             else:
-                self.max_seq_len = config["max_position_embeddings"]
+                self.max_seq_len = config.get("max_position_embeddings", 4096)
             self.num_hidden_layers = config["num_hidden_layers"]
             self.n_head = config["num_attention_heads"]
             self.hidden_size = config["hidden_size"]
-            self.ffn_embed_dim = config["intermediate_size"]
+            # Mixtral uses MoE: use intermediate_size of a single expert's FFN
+            self.ffn_embed_dim = config.get("intermediate_size", config.get("hidden_size", 4096) * 4)
             self.vocab_size = config["vocab_size"]
+            self.num_local_experts = config.get("num_local_experts", 1)
         else:
             raise NotImplementedError
 

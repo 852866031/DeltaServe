@@ -377,9 +377,9 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
 
     # minimal required args
-    ap.add_argument("--timeline_csv", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv")
+    ap.add_argument("--timeline_csv", default="/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/timeline_live.csv")
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
-    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
+    ap.add_argument("--lora_dir", default="/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
 
     # small set of useful knobs
     ap.add_argument("--launcher", default="launch_llama3.py")

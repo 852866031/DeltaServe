@@ -147,8 +147,8 @@ async def main():
     # ======================================================
     # RUN clean.sh AFTER scheduler completes
     # ======================================================
-    # os.system("ps aux | grep 'jiaxuan' | grep 'slora' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
-    # os.system("ps aux | grep 'jiaxuan' | grep 'auto_benchmark.py ' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
+    # os.system("ps aux | grep 'ramya' | grep 'slora' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
+    # os.system("ps aux | grep 'ramya' | grep 'auto_benchmark.py ' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
     print("[auto] Done.")
 
 

@@ -573,6 +573,8 @@ def main():
                         help="the adapter weight dirs associate with base model dir")
     parser.add_argument("--fair-weights", type=int, default=[], action="append")
     parser.add_argument("--dummy", action="store_true")
+    parser.add_argument("--ep", action="store_true",
+                        help="Use Expert Parallelism (EP) for Mixtral MoE FFN instead of TP.")
     parser.add_argument("--swap", action="store_true")
     parser.add_argument("--pool-size-lora", type=int, default=0)
     parser.add_argument("--prefetch", action="store_true")
@@ -654,6 +656,8 @@ def main():
     assert args.max_req_input_len < args.max_req_total_len
     setting["max_req_total_len"] = args.max_req_total_len
     setting["nccl_port"] = args.nccl_port
+    for i in range(args.tp):
+        setting[f"nccl_port_{i}"] = args.nccl_port + i
 
     if args.batch_max_tokens is None:
         batch_max_tokens = int(1/5 * args.max_total_token_num)

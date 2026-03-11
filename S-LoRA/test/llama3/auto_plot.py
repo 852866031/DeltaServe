@@ -5,15 +5,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ---------------- Fixed paths ----------------
-TIMELINE_CSV = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv"
+TIMELINE_CSV = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/timeline_live.csv"
 
 # Replaced auto benchmark results path
-RESULTS_CSV = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_results.csv"
+RESULTS_CSV = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/timeline_results.csv"
 
 # Replaced lms.log path with backward log CSV
-BWD_LOG_CSV = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/bwd_log.csv"
+BWD_LOG_CSV = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/bwd_log.csv"
 
-OUT_PATH = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/auto_benchmark_summary.png"
+OUT_PATH = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/auto_benchmark_summary.png"
 
 
 # ---------------- Utilities ----------------

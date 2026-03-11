@@ -12,7 +12,7 @@ r = 16
 lora_alpha = 16
 lora_dropout = 0.05
 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
+lora_dir = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
 os.makedirs(lora_dir, exist_ok=True)
 
 # === Save config file ===

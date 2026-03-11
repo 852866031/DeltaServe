@@ -98,7 +98,7 @@ class Llama3TpPartModel(LlamaTpPartModel):
                 tot_size=self.max_total_token_num + self.mem_adapter_size,
                 cache_size=self.max_total_token_num,
                 dtype=torch.float16,
-                head_num=self.config["num_attention_heads"], 
+                head_num=tp_kv_head_num,  # KV cache uses KV heads, not Q heads (GQA fix)
                 head_dim=head_dim,
                 layer_num=self.config["num_hidden_layers"],
             )

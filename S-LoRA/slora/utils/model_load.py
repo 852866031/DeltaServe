@@ -16,8 +16,10 @@ def hf_load_config(weights_dir, mode="adapter"):
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path=weights_dir):
+            # Download only JSON metadata (config, tokenizer) — weight files
+            # are fetched separately by hf_load_utils.load_hf_weights.
             weights_dir = snapshot_download(weights_dir,
-                                        allow_patterns=["*.bin", "*.json", "*.safetensors"])
+                                        allow_patterns=["*.json"])
     config_name = "adapter_config.json" if mode == "adapter" else "config.json"
     with open(os.path.join(weights_dir, config_name), "r") as f:
         return json.load(f), weights_dir

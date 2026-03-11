@@ -1,7 +1,7 @@
 {
-  "finetuning_data_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/alignment_data_collection.csv",
-  "finetuning_lora_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",
-  "reference_lora_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter_ref",
+  "finetuning_data_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/alignment_data_collection.csv",
+  "finetuning_lora_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",
+  "reference_lora_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter_ref",
   "finetuning_type": "Alignment Live",
   "min_backward_sample_count": 2,
   "finetuning_prepare_size": 999999,

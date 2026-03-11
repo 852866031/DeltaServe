@@ -130,7 +130,7 @@ class RouterManager:
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.req_queue = get_scheduler(input_params, adapter_dirs)
-        self.profiling_batch_generator = ProfilingBatchGenerator(input_params.finetuning_params, adapter_dirs[0])
+        self.profiling_batch_generator = ProfilingBatchGenerator(input_params.finetuning_params, adapter_dirs[0] if adapter_dirs else None)
         self.profiling_batch_generator.prepare()
         self.prefill_estimator = PrefillExecutionEstimator()
         self.decode_estimator = DecodeExecutionEstimator()
@@ -553,6 +553,9 @@ class RouterManager:
                 assert False, f"Error Req Inf {recv_req}"
 
     def clean_up(self):
+        self.batch_exec_tracker.write_batch_prediction_stats_to_csv(
+            csv_path=f"prediction_stats_{self.model_weightdir.replace('/', '_')}.csv"
+        )
         for model_rpc in self.model_rpcs:
             model_rpc.rpc_server_process.kill()
         for model_rpc in self.model_rpcs:
@@ -686,6 +689,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                tokenizer_mode=args.tokenizer_mode,
                                trust_remote_code=args.trust_remote_code,
                                finetuning_config=args.finetuning_config,
+                               use_ep=getattr(args, "ep", False),
                               )
 
     try:

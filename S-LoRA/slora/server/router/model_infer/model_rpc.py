@@ -111,6 +111,29 @@ class ModelRpcServer(rpyc.Service):
                                                     enable_unified_mem_manager=enable_unified_mem_manager,
                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
                     if gpu_profiler is not None: gpu_profiler.mark_annotation("model_load")
+            elif self.model_type in ("mistral", "mixtral"):
+                if getattr(input_params, "use_ep", False):
+                    from slora.models.mixtral.model import MixtralEPTpPartModel
+                    self.model = MixtralEPTpPartModel(rank_id, world_size, weight_dir,
+                                                      max_total_token_num,
+                                                      mem_adapter_size=input_params.pool_size_lora,
+                                                      load_way=load_way, mode=mode,
+                                                      dummy=input_params.dummy,
+                                                      half_model=half_model,
+                                                      mem_manager_log_path=mem_manager_log_path,
+                                                      enable_unified_mem_manager=enable_unified_mem_manager,
+                                                      unified_mem_manager_max_size=unified_mem_manager_max_size)
+                else:
+                    from slora.models.mixtral.model import MixtralTpPartModel
+                    self.model = MixtralTpPartModel(rank_id, world_size, weight_dir,
+                                                    max_total_token_num,
+                                                    mem_adapter_size=input_params.pool_size_lora,
+                                                    load_way=load_way, mode=mode,
+                                                    dummy=input_params.dummy,
+                                                    half_model=half_model,
+                                                    mem_manager_log_path=mem_manager_log_path,
+                                                    enable_unified_mem_manager=enable_unified_mem_manager,
+                                                    unified_mem_manager_max_size=unified_mem_manager_max_size)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:

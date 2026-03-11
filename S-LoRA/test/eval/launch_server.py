@@ -35,8 +35,8 @@ CONFIG = {
             "tloen/alpaca-lora-7b",
             "MBZUAI/bactrian-x-llama-7b-lora"
         ],
-        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/finetuning_config.json",
-        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/no_finetuning_config.json",
+        "finetuning_config_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/eval/config/finetuning_config.json",
+        "no_finetuning_config_path": "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/eval/config/no_finetuning_config.json",
     },
 
     "defaults": {

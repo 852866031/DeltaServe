@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------
-result_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/results"
+result_dir = "/mnt/nfs/home/ramya/slora-plus/S-LoRA/test/eval/results"
 
 group_files = [
     [f"{result_dir}/latency_co-serving_4rps.csv",
