@@ -79,7 +79,12 @@ class Llama3TransformerLayerInfer(LlamaTransformerLayerInfer):
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
+
+        # For CUDA graph compatibility, use pre-allocated att_m buffer if available
+        if hasattr(infer_state, '_att_m_buffers') and infer_state._att_m_buffers is not None:
+            att_m_tensor = infer_state._att_m_buffers[self.layer_num_]
+        else:
+            att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
 
         token_att_fwd(q.view(calcu_shape1),
                       infer_state.mem_manager.key_buffer[self.layer_num_],

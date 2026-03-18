@@ -10,10 +10,10 @@ CONFIG = {
     "online": {
         "base_model": "meta-llama/Meta-Llama-3-8B",
         "adapter_dirs": [
-            "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
+            "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
         ],
-        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
-        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
+        "finetuning_config_path": "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
+        "no_finetuning_config_path": "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
     },
 
     "defaults": {
@@ -56,19 +56,21 @@ if __name__ == "__main__":
         print("⚠️  WARNING: Internet is not available. Exiting.")
         sys.exit(1)
 
-    if not is_mps_running():
-        print("MPS control daemon is not running. Please start it with:")
-        print("  sudo nvidia-cuda-mps-control -d")
-        sys.exit(1)
+    # if not is_mps_running():
+    #     print("MPS control daemon is not running. Please start it with:")
+    #     print("  sudo nvidia-cuda-mps-control -d")
+    #     sys.exit(1)
 
     # -----------------------------------
     # 👇 Only expose 3 arguments to user
     # -----------------------------------
     parser = argparse.ArgumentParser()
     parser.add_argument("--enable-finetuning", action="store_true")
+    parser.add_argument("--enable-cuda-graph", action="store_true",
+                        help="Enable CUDA graph capture for decode steps")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--ft_log_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
+    parser.add_argument("--ft_log_path", type=str, default="/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
 
     args = parser.parse_args()
 
@@ -95,6 +97,9 @@ if __name__ == "__main__":
     for adapter_dir in BASE["adapter_dirs"]:
         cmd += f" --lora {adapter_dir}"
     cmd += " --swap"
+
+    if args.enable_cuda_graph:
+        cmd += " --enable-cuda-graph"
 
     # unified mem manager etc.
     if D["half_model"]:

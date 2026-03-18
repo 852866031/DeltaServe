@@ -31,5 +31,6 @@ class LlamaInferStateInfo(InferStateInfo):
         else:
             self.position_cos = torch.index_select(model._cos_cached, 0, b_seq_len - 1).view(b_seq_len.shape[0], -1)
             self.position_sin = torch.index_select(model._sin_cached, 0, b_seq_len - 1).view(b_seq_len.shape[0], -1)
+            # Store as tensor to avoid .item() GPU sync (needed for CUDA graph compatibility)
             self.other_kv_index = b_loc[0, max_len_in_batch - 1].item()
         return

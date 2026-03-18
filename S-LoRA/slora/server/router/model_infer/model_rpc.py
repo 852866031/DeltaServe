@@ -340,12 +340,13 @@ class ModelRpcServer(rpyc.Service):
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
             elif self.input_params.finetuning_params.finetuning_lora_path!="":
                 engine = LoraUnorderedBatchMixed(
-                        self.model, 
-                        adapters, 
-                        infer_adapter=self.infer_adapter, 
+                        self.model,
+                        adapters,
+                        infer_adapter=self.infer_adapter,
                         infer_adapter_alt=self.infer_adapter_alt,
                         finetuning_adapter=self.finetuning_adapter,
-                        enable_unified_mem_manager=self.enable_unified_mem_manager)
+                        enable_unified_mem_manager=self.enable_unified_mem_manager,
+                        enable_cuda_graph=getattr(self.input_params, 'enable_cuda_graph', False))
                 kwargs["finetune_mask"] = batch.finetune_mask
                 kwargs["b_loc_key"] = batch.nopad_b_loc_key
                 kwargs["b_loc_value"] = batch.nopad_b_loc_value

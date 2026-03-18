@@ -103,7 +103,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             return
         else:
             if not infer_state.decode_is_contiguous:
-                print("Not support non-contiguous decode mem index yet.")
+                pass  # non-contiguous decode path (used by CUDA graph)
                 if infer_state.alt_mem_manager!=None:
                     alt_mem_manager = infer_state.alt_mem_manager
                     alt_mem_manager.pin_pages(infer_state.decode_mem_index_key)
@@ -177,9 +177,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
+
+        # For CUDA graph compatibility, use pre-allocated att_m buffer if available
+        # (avoids dynamic-shape torch.empty that would break graph replay)
+        if hasattr(infer_state, '_att_m_buffers') and infer_state._att_m_buffers is not None:
+            att_m_tensor = infer_state._att_m_buffers[self.layer_num_]
+        else:
+            att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
+
         buffer_address, gpu_b_loc_key, gpu_b_loc_value = infer_state.alt_mem_manager.prepare_b_locs_for_layer(
-                infer_state.b_loc_key, infer_state.b_loc_value, infer_state.b_seq_len, self.layer_num_) 
+                infer_state.b_loc_key, infer_state.b_loc_value, infer_state.b_seq_len, self.layer_num_)
         kv_heads = self.tp_k_head_num_
         token_att_fwd(q.view(calcu_shape1),
                           buffer_address,
@@ -190,10 +197,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                           infer_state.max_len_in_batch,
                           kv_heads=kv_heads)
 
-        start = time.time()
         o_tensor = torch.empty_like(q)
         from slora.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
-        token_softmax_reducev_fwd(att_m_tensor, 
+        token_softmax_reducev_fwd(att_m_tensor,
                                         buffer_address,
                                         o_tensor.view(calcu_shape1),
                                         gpu_b_loc_value,
@@ -208,7 +214,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
+
+        # For CUDA graph compatibility, use pre-allocated att_m buffer if available
+        if hasattr(infer_state, '_att_m_buffers') and infer_state._att_m_buffers is not None:
+            att_m_tensor = infer_state._att_m_buffers[self.layer_num_]
+        else:
+            att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
 
         token_att_fwd(q.view(calcu_shape1),
                       infer_state.mem_manager.key_buffer[self.layer_num_],

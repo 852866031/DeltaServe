@@ -123,7 +123,8 @@ class InputParams:
         self.no_mem_pool = no_mem_pool
         self.bmm = bmm
         self.no_lora = no_lora
-        
+        self.enable_cuda_graph = False  # set externally after construction
+
         self.finetuning_params = FinetuneParams(
             model_weightdir=model_weightdir,
             tokenizor_mode=tokenizer_mode,

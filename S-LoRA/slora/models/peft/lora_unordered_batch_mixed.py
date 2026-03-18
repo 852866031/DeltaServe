@@ -20,6 +20,7 @@ from ...server.router.mixed_req_queue import rprint
 import hashlib
 from slora.models.peft.alt_to_slora_kernel import dispatch_bgmv_pt, compare_tensors, dispatch_bgmv_pt_exact
 import math
+from slora.common.cuda_graph_runner import CudaGraphRunner
 
 
 import torch
@@ -40,8 +41,12 @@ def kernel_bgmv(y: torch.Tensor , x: torch.Tensor, w: torch.Tensor, start_indici
     dispatch_bgmv(y, x, w, start_indicies, lora_ranks, loc_indicies, indicies, qkvo, lora_scales, w_ld, w_valid)
 
 class LoraUnorderedBatchMixed:
-    def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None, infer_adapter_alt=None, enable_unified_mem_manager=False):
+    # Class-level shared CudaGraphRunner (persists across engine instances)
+    _shared_cuda_graph_runner = None
+
+    def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None, infer_adapter_alt=None, enable_unified_mem_manager=False, enable_cuda_graph=False):
         self.base_model = base_model
+        self.enable_cuda_graph = enable_cuda_graph
 
         lora_layer_dim = [adapter.r if adapter is not None else 0 for adapter in adapters]
         self.max_lora_dim = max(lora_layer_dim)
@@ -657,26 +662,40 @@ class LoraUnorderedBatchMixed:
         return o
 
     # Decoding functions for inference
-    def _decode(self, batch_size, total_token_num, max_len_in_batch,
-                input_ids, b_loc, b_loc_key, b_loc_value, 
-                b_start_loc, b_seq_len, no_lora_compute=False, no_lora_copy=False, print_time_profile=False):
-        start = time.time()
+    def _prepare_decode_infer_state(self, batch_size, total_token_num, max_len_in_batch,
+                                     input_ids, b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len):
+        """Prepare infer_state for decode: memory allocation + state setup.
+        This must run OUTSIDE any CUDA graph capture since it contains CPU logic.
+
+        When enable_cuda_graph=True, forces non-contiguous decode path so that
+        KV cache writes use static-address buffers (decode_key_buffer/decode_value_buffer)
+        compatible with CUDA graph capture/replay.
+        """
         infer_state = self.base_model.infer_state_class()
         infer_state.is_prefill = False
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
+        infer_state._att_m_buffers = None  # set by CudaGraphRunner if needed
         assert (b_loc.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0])
-        infer_state.b_start_loc = b_start_loc 
+        infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
+
+        # When CUDA graph is enabled, force non-contiguous path.
+        # The contiguous path creates views into gpu_pool with addresses that change
+        # each step (decode_mem_start/end), which breaks CUDA graph replay.
+        force_non_contiguous = self.enable_cuda_graph
 
         if self.enable_unified_mem_manager:
             infer_state.alt_mem_manager = self.base_model.alt_mem_manager
             infer_state.b_loc_key = b_loc_key
             infer_state.b_loc_value = b_loc_value
-            #start = time.time()
-            alloc_mem = self.base_model.alt_mem_manager.alloc_contiguous_kv(batch_size, PageType.KV_CACHE)
-            #print(f"[decode] alloc_contiguous_kv time: {time.time() - start:.5f}s")
+
+            if not force_non_contiguous:
+                alloc_mem = self.base_model.alt_mem_manager.alloc_contiguous_kv(batch_size, PageType.KV_CACHE)
+            else:
+                alloc_mem = None  # skip contiguous, go to non-contiguous path
+
             if alloc_mem is not None:
                 infer_state.decode_is_contiguous = True
                 infer_state.decode_mem_index_key = alloc_mem[0]
@@ -688,7 +707,7 @@ class LoraUnorderedBatchMixed:
                 b_loc_key[:, max_len_in_batch - 1] = infer_state.decode_mem_index_key
                 b_loc_value[:, max_len_in_batch - 1] = infer_state.decode_mem_index_value
                 self.base_model.alt_mem_manager.reset_b_loc_kv(b_loc_key, b_loc_value)
-            else:    
+            else:
                 infer_state.decode_is_contiguous = False
                 infer_state.decode_mem_index_key = self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE)
                 infer_state.decode_mem_index_value = self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE)
@@ -705,7 +724,12 @@ class LoraUnorderedBatchMixed:
         else:
             infer_state.b_loc = b_loc
             infer_state.mem_manager = self.base_model.mem_manager
-            alloc_mem = self.base_model.mem_manager.alloc_contiguous(batch_size)
+
+            if not force_non_contiguous:
+                alloc_mem = self.base_model.mem_manager.alloc_contiguous(batch_size)
+            else:
+                alloc_mem = None
+
             if alloc_mem is not None:
                 infer_state.decode_is_contiguous = True
                 infer_state.decode_mem_index = alloc_mem[0]
@@ -726,10 +750,47 @@ class LoraUnorderedBatchMixed:
 
         infer_state.init_some_extra_state(self.base_model, batch_size, total_token_num, max_len_in_batch,
                                           input_ids, b_loc, b_start_loc, b_seq_len, False)
-        predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy, print_time_profile=print_time_profile)
-        # Wait for GPU to finish this step
-        # if print_time_profile:
-        #     print(f"[forward engine]:total decode time {(time.time() - start):.5f}\n")
+        return infer_state
+
+    def _decode(self, batch_size, total_token_num, max_len_in_batch,
+                input_ids, b_loc, b_loc_key, b_loc_value,
+                b_start_loc, b_seq_len, no_lora_compute=False, no_lora_copy=False, print_time_profile=False):
+        start = time.time()
+        infer_state = self._prepare_decode_infer_state(
+            batch_size, total_token_num, max_len_in_batch,
+            input_ids, b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len)
+
+        if self.enable_cuda_graph:
+            predict_logics = self._decode_with_cuda_graph(
+                batch_size, max_len_in_batch, input_ids, infer_state, no_lora_compute, no_lora_copy)
+        else:
+            predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy, print_time_profile=print_time_profile)
+        return predict_logics
+
+    def _decode_with_cuda_graph(self, batch_size, max_len_in_batch, input_ids, infer_state, no_lora_compute, no_lora_copy):
+        """Execute decode forward pass using CUDA graph capture/replay."""
+        if LoraUnorderedBatchMixed._shared_cuda_graph_runner is None:
+            LoraUnorderedBatchMixed._shared_cuda_graph_runner = CudaGraphRunner(
+                max_total_tokens=self.base_model.max_total_token_num if hasattr(self.base_model, 'max_total_token_num') else 25000,
+                num_layers=self.base_model.layers_num,
+                tp_q_head_num=self.base_model.tp_q_head_num_,
+                tp_k_head_num=self.base_model.tp_k_head_num_,
+                head_dim=self.base_model.head_dim_,
+            )
+
+        forward_kwargs = {
+            'no_lora_compute': no_lora_compute,
+            'no_lora_copy': no_lora_copy,
+            'print_time_profile': False,
+        }
+
+        if LoraUnorderedBatchMixed._shared_cuda_graph_runner.has_graph(batch_size, max_len_in_batch):
+            predict_logics = LoraUnorderedBatchMixed._shared_cuda_graph_runner.replay(
+                batch_size, max_len_in_batch, input_ids, infer_state)
+        else:
+            predict_logics = LoraUnorderedBatchMixed._shared_cuda_graph_runner.capture(
+                batch_size, max_len_in_batch, self._token_forward,
+                input_ids, infer_state, forward_kwargs)
         return predict_logics
     
     @final

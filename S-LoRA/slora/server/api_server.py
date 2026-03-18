@@ -601,6 +601,10 @@ def main():
     parser.add_argument("--enable_gpu_profile", action="store_true")
     parser.add_argument("--ft_log_path", type=str, default="")
     ''' end of finetune arguments '''
+
+    ''' cuda graph arguments '''
+    parser.add_argument("--enable-cuda-graph", action="store_true",
+                        help="Enable CUDA graph capture for decode steps to reduce kernel launch overhead")
     
     args = parser.parse_args()
     args.finetuning_config = {}

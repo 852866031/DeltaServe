@@ -687,6 +687,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                trust_remote_code=args.trust_remote_code,
                                finetuning_config=args.finetuning_config,
                               )
+    input_params.enable_cuda_graph = getattr(args, 'enable_cuda_graph', False)
 
     try:
         router = RouterManager(
@@ -721,7 +722,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     
     except Exception as e:
         import traceback
-        err_str = '\n'.join(traceback.format_exception(e))
+        err_str = '\n'.join(traceback.format_exception(type(e), e, e.__traceback__))
         pipe_writer.send(err_str)
         router.clean_up()
         raise
