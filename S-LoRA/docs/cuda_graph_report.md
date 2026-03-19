@@ -25,7 +25,7 @@
 
 ### 2.2 性能对比
 
-| 指标 | Baseline (无 CUDA Graph) | CUDA Graph | 加速比 |
+| 指标 | Baseline | CUDA Graph | Acc |
 |------|--------------------------|------------|--------|
 | **Avg Wall Time** | 1.0786s | 0.4854s | **2.22x** |
 | **Avg TBT (time between tokens)** | 0.0165s (16.5ms) | 0.0071s (7.1ms) | **2.32x** |

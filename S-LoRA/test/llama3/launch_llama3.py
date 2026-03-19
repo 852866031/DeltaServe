@@ -5,15 +5,20 @@ import sys
 import os, subprocess, time, shutil
 import socket
 import requests
+import json
+
+from pathlib import Path
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 
 CONFIG = {
     "online": {
         "base_model": "meta-llama/Meta-Llama-3-8B",
         "adapter_dirs": [
-            "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
+            str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"),
         ],
-        "finetuning_config_path": "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
-        "no_finetuning_config_path": "/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
+        "finetuning_config_path": str(SCRIPT_DIR / "config" / "finetuning_config.json"),
+        "no_finetuning_config_path": str(SCRIPT_DIR / "config" / "no_finetuning_config.json"),
     },
 
     "defaults": {
@@ -46,6 +51,32 @@ def is_mps_running():
         return p.returncode == 0
     except Exception:
         return False
+    
+
+
+def update_json_paths(config_json_path):
+    """
+    Update finetuning_data_path and finetuning_lora_path inside the JSON file
+    so they become absolute paths based on the JSON file's location.
+    """
+    config_json_path = Path(config_json_path).resolve()
+    config_dir = config_json_path.parent
+
+    with open(config_json_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    # If your JSON is under .../test/llama3/config/,
+    # then project root is .../test/llama3/
+    project_root = config_dir.parent
+
+    config["finetuning_data_path"] = str(project_root / "config" / Path(config["finetuning_data_path"]).name)
+    config["finetuning_lora_path"] = str(project_root / "adapters" / Path(config["finetuning_lora_path"]).name)
+
+    with open(config_json_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+    print(f"Updated JSON file: {config_json_path}")
+
 
 if __name__ == "__main__":
     online = internet_available()
@@ -89,8 +120,10 @@ if __name__ == "__main__":
     cmd += f" --ft_log_path {args.ft_log_path}"
 
     if args.enable_finetuning:
+        update_json_paths(BASE["finetuning_config_path"])
         cmd += f" --finetuning_config_path {BASE['finetuning_config_path']}"
     else:
+        update_json_paths(BASE["no_finetuning_config_path"])
         cmd += f" --finetuning_config_path {BASE['no_finetuning_config_path']}"
 
     # adapter dirs

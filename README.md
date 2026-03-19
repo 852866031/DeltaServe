@@ -7,10 +7,16 @@ conda create -n dserve python=3.9
 conda activate dserve 
 # cuda > 12.6
 pip install torch==2.8.0
-pip install uvloop=0.22.0
+pip install uvloop==0.21.0
 pip install -e . --no-build-isolation
 pip install triton==3.4.0
 ```
+
+To use the plotting scripts, you also need to install 
+```
+pip install pandas matplotlib
+```
+
 
 ## Llama3 Experiments:
 Please update the path in the following files to correct path in your system

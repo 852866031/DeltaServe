@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+from pathlib import Path
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 
 # ----------------------------
 # Request helpers
@@ -377,15 +380,16 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
 
     # minimal required args
-    ap.add_argument("--timeline_csv", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv")
+    ap.add_argument("--timeline_csv", default=str(SCRIPT_DIR / "timeline_live.txt"))
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
-    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
+    ap.add_argument("--lora_dir", default=str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"))
 
     # small set of useful knobs
     ap.add_argument("--launcher", default="launch_llama3.py")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--rank_id", type=int, default=0)
     ap.add_argument("--co", action="store_true")  # enable finetuning mode
+    ap.add_argument("--graph", action="store_true", default=False)  # enable CUDA graph
     ap.add_argument("--out_csv", default="timeline_results.csv")
 
     # warmup config
@@ -416,6 +420,9 @@ async def main() -> None:
     ]
     if args.co:
         cmd.append("--enable-finetuning")
+    if args.graph:
+        cmd.append("--enable-cuda-graph")
+        args.out_csv = args.out_csv.replace(".csv", "_graph.csv")
 
     print("[orchestrator] launching:", " ".join(cmd), flush=True)
 
