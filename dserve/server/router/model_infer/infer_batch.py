@@ -1,14 +1,14 @@
-from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
+from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator
 import torch
 import numpy as np
 import collections
 
-from slora.common.configs.config import setting
+from dserve.common.configs.config import setting
 from dataclasses import dataclass
 from typing import List, Dict
-from slora.common.mem_manager import MemoryManager
-from slora.utils.infer_utils import mark_start, mark_end
-from slora.utils.infer_utils import calculate_time
+from dserve.common.mem_manager import MemoryManager
+from dserve.utils.infer_utils import mark_start, mark_end
+from dserve.utils.infer_utils import calculate_time
 
 
 class InferSamplingParams:

@@ -2,10 +2,10 @@ import os
 import json
 import torch
 
-from slora.models.llama2.layer_infer.transformer_layer_infer import Llama2TransformerLayerInfer
-from slora.models.llama2.layer_weights.transformer_layer_weight import Llama2TransformerLayerWeight
+from dserve.models.llama2.layer_infer.transformer_layer_infer import Llama2TransformerLayerInfer
+from dserve.models.llama2.layer_weights.transformer_layer_weight import Llama2TransformerLayerWeight
 
-from slora.models.llama.model import LlamaTpPartModel
+from dserve.models.llama.model import LlamaTpPartModel
 
 
 class Llama2TpPartModel(LlamaTpPartModel):

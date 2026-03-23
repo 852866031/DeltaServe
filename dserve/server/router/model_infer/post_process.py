@@ -1,8 +1,8 @@
 import re
 import torch
 from typing import List
-from slora.server.router.model_infer.infer_batch import InferBatch
-from slora.common.basemodel.triton_kernel.apply_penalty import apply_penalty
+from dserve.server.router.model_infer.infer_batch import InferBatch
+from dserve.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
 def sample(logits, batch:InferBatch):
     logits = logits.contiguous()

@@ -7,7 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 class TestLlama2Infer(unittest.TestCase):
 
     def test_llama2_infer(self):
-        from slora.models.llama2.model import Llama2TpPartModel
+        from dserve.models.llama2.model import Llama2TpPartModel
         test_model_inference(world_size=8, 
                              model_dir="/path/llama2-7b-chat", 
                              model_class=Llama2TpPartModel, 

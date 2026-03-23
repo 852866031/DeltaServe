@@ -15,10 +15,10 @@
 
 import hashlib
 import math
-from slora.models.llama.SFT_service import LlamaSFTBackwardService
+from dserve.models.llama.SFT_service import LlamaSFTBackwardService
 import torch
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
 
 # import your base service
 # from .llama1_backward_service import LlamaSFTBackwardService

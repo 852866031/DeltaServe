@@ -3,12 +3,12 @@ import hashlib
 import math
 import time
 from multiprocessing import Pipe
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
 
 def bwd_print(*args, sep=' ', end='\n'):
     color = "\033[35m"

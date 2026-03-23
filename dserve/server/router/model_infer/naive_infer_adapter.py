@@ -4,8 +4,8 @@ import torch
 from typing import List, Dict, Any
 import time
 
-from slora.common.mem_allocator import MemoryAllocator
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve.common.mem_allocator import MemoryAllocator
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
 
 
 @dataclass

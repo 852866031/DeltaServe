@@ -6,8 +6,8 @@ from typing import List, Optional
 import numpy as np
 
 from ..io_struct import Batch, Req
-from slora.utils.infer_utils import  calculate_time
-from slora.server.router.req_queue import ReqQueue
+from dserve.utils.infer_utils import  calculate_time
+from dserve.server.router.req_queue import ReqQueue
 
 
 class VTCReqQueue(ReqQueue):

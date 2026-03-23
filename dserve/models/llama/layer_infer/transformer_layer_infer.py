@@ -1,5 +1,5 @@
 import time
-from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
+from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator
 import torch
 import torch.functional as F
 import torch.distributed as dist
@@ -7,17 +7,17 @@ import numpy as np
 from typing import Tuple
 import triton
 
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from slora.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from slora.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
-from slora.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
-from slora.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
-from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from dserve.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
+from dserve.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
+from dserve.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
-from slora.models.llama.infer_struct import LlamaInferStateInfo
-from slora.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
-from slora.common.basemodel import TransformerLayerInferTpl
+from dserve.models.llama.infer_struct import LlamaInferStateInfo
+from dserve.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
+from dserve.common.basemodel import TransformerLayerInferTpl
 
 @torch.no_grad()
 def context_attention_fwd_pytorch(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
@@ -198,7 +198,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                           kv_heads=kv_heads)
 
         o_tensor = torch.empty_like(q)
-        from slora.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
+        from dserve.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
         token_softmax_reducev_fwd(att_m_tensor,
                                         buffer_address,
                                         o_tensor.view(calcu_shape1),
@@ -248,7 +248,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             return o_tensor
         elif triton.__version__ >= "2.1.0":
             o_tensor = torch.empty_like(q)
-            from slora.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
+            from dserve.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
             token_softmax_reducev_fwd(att_m_tensor, 
                                       infer_state.mem_manager.value_buffer[self.layer_num_],
                                       o_tensor.view(calcu_shape1),
@@ -330,7 +330,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     #     elif triton.__version__ >= "2.1.0":
     #         start = time.time()
     #         o_tensor = torch.empty_like(q)
-    #         from slora.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
+    #         from dserve.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
     #         token_softmax_reducev_fwd(att_m_tensor, 
     #                                       buffer_address,
     #                                       o_tensor.view(calcu_shape1),

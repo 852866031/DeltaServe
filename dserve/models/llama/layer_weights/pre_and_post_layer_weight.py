@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from slora.common.basemodel import PreAndPostLayerWeight
+from dserve.common.basemodel import PreAndPostLayerWeight
 
 
 class LlamaPreAndPostLayerWeight(PreAndPostLayerWeight):

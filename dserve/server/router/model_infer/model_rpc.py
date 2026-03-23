@@ -5,8 +5,8 @@ import threading
 
 import numpy as np
 import rpyc
-from slora.models.llama.SFT_service import LlamaSFTBackwardService
-from slora.models.llama3.model import Llama3TpPartModel
+from dserve.models.llama.SFT_service import LlamaSFTBackwardService
+from dserve.models.llama3.model import Llama3TpPartModel
 import torch
 import traceback
 import time
@@ -21,22 +21,22 @@ from typing import Dict, List, Tuple
 from rpyc.utils.classic import obtain
 
 from transformers.configuration_utils import PretrainedConfig
-from slora.server.router.model_infer.infer_batch import InferBatch
+from dserve.server.router.model_infer.infer_batch import InferBatch
 
-from slora.common.configs.config import setting
-from slora.models.llama.model import LlamaTpPartModel
-from slora.models.llama2.model import Llama2TpPartModel
-from slora.models.peft.lora_adapter import LoraTpPartAdapter
-from slora.models.peft.lora_unordered_batch_infer import LoraUnorderedBatchInfer
-from slora.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
-from slora.models.peft.lora_single_batch_infer import LoraPEFTBatchInfer
-from slora.models.bmm.lora_bmm_infer import LoraBmmInfer
-from slora.server.router.model_infer.infer_adapter import InferAdapter
-from slora.server.router.model_infer.infer_adapter_alt import InferAdapterAlt
-from slora.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
-from slora.utils.infer_utils import set_random_seed
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
-from slora.utils.model_utils import get_model_config
+from dserve.common.configs.config import setting
+from dserve.models.llama.model import LlamaTpPartModel
+from dserve.models.llama2.model import Llama2TpPartModel
+from dserve.models.peft.lora_adapter import LoraTpPartAdapter
+from dserve.models.peft.lora_unordered_batch_infer import LoraUnorderedBatchInfer
+from dserve.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
+from dserve.models.peft.lora_single_batch_infer import LoraPEFTBatchInfer
+from dserve.models.bmm.lora_bmm_infer import LoraBmmInfer
+from dserve.server.router.model_infer.infer_adapter import InferAdapter
+from dserve.server.router.model_infer.infer_adapter_alt import InferAdapterAlt
+from dserve.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
+from dserve.utils.infer_utils import set_random_seed
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve.utils.model_utils import get_model_config
 from .post_process import sample
 
 from ..mixed_req_queue import rprint

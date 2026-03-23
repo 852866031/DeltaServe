@@ -1,6 +1,6 @@
-from slora.mprophet.constants import GB, T, get_num_bytes
-from slora.mprophet.hardware_parameters import TFLOPS
-from slora.mprophet.model_config import ModelConfig
+from dserve.mprophet.constants import GB, T, get_num_bytes
+from dserve.mprophet.hardware_parameters import TFLOPS
+from dserve.mprophet.model_config import ModelConfig
 
 
 class ModelProphet:

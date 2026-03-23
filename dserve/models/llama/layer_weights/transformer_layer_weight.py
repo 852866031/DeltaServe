@@ -1,7 +1,7 @@
 import torch
 import math
 import numpy as np
-from slora.common.basemodel import TransformerLayerWeight
+from dserve.common.basemodel import TransformerLayerWeight
 
 
 class LlamaTransformerLayerWeight(TransformerLayerWeight):

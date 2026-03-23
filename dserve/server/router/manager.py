@@ -1,8 +1,8 @@
 import copy
 from functools import partial
-from slora.server.router.profile_req_queue import Profile_ReqQueue
-from slora.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
-from slora.server.router.profiling_batch_generator import ProfilingBatchGenerator
+from dserve.server.router.profile_req_queue import Profile_ReqQueue
+from dserve.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
+from dserve.server.router.profiling_batch_generator import ProfilingBatchGenerator
 import uvloop
 import asyncio
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -20,18 +20,18 @@ from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from .mixed_req_queue import Mixed_ReqQueue
 from rpyc.utils.classic import obtain
-from slora.utils.infer_utils import calculate_time
+from dserve.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq
 from .stats import Stats
 
-from slora.server.input_params import InputParams
-from slora.models.peft.lora_adapter import get_lora_config
-from slora.server.router.profiler import AlphaModel, BetaModel
-from slora.server.router.abort_req_queue import AbortReqQueue
-from slora.server.router.cluster_req_queue import ClusterReqQueue
-from slora.server.router.vtc_req_queue import VTCReqQueue
-from slora.server.router.pets_req_queue import PETSReqQueue
-from slora.server.router.peft_req_queue import PEFTReqQueue
+from dserve.server.input_params import InputParams
+from dserve.models.peft.lora_adapter import get_lora_config
+from dserve.server.router.profiler import AlphaModel, BetaModel
+from dserve.server.router.abort_req_queue import AbortReqQueue
+from dserve.server.router.cluster_req_queue import ClusterReqQueue
+from dserve.server.router.vtc_req_queue import VTCReqQueue
+from dserve.server.router.pets_req_queue import PETSReqQueue
+from dserve.server.router.peft_req_queue import PEFTReqQueue
 
 def get_scheduler(input_params, adapter_dirs):
     if input_params.scheduler == "vtc_fair":

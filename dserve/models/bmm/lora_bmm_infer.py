@@ -3,10 +3,10 @@ import torch
 import torch.nn as nn
 from typing import final
 
-from slora.common.infer_utils import init_bloc
-from slora.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from slora.utils.infer_utils import mark_cost_time
+from dserve.common.infer_utils import init_bloc
+from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from dserve.utils.infer_utils import mark_cost_time
 
 
 class LoraBmmInfer:

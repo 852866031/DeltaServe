@@ -2,11 +2,11 @@ import re
 import torch
 import os
 import json
-from slora.mprophet.lora_config import get_lora_config_json
-from slora.models.peft.layer_weights.hf_load_utils import load_hf_weights
-from slora.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
-from slora.utils.model_load import hf_load_config
-from slora.server.router.mixed_req_queue import rprint
+from dserve.mprophet.lora_config import get_lora_config_json
+from dserve.models.peft.layer_weights.hf_load_utils import load_hf_weights
+from dserve.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
+from dserve.utils.model_load import hf_load_config
+from dserve.server.router.mixed_req_queue import rprint
 
 
 def get_lora_config_finetune():

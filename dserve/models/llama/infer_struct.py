@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from slora.common.basemodel import InferStateInfo
+from dserve.common.basemodel import InferStateInfo
 
 class LlamaInferStateInfo(InferStateInfo):
     def __init__(self):

@@ -3,14 +3,14 @@ import torch
 import torch.nn as nn
 from typing import final
 
-from slora.common.infer_utils import init_bloc
-from slora.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from slora.models.peft.triton_kernel.lora.lora_prefill import lora_get_qkvo_fwd_shrink, lora_get_qkvo_fwd_expand
-from slora.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
-from slora.utils.infer_utils import mark_cost_time
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
-from slora._kernels import dispatch_bgmv
+from dserve.common.infer_utils import init_bloc
+from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from dserve.models.peft.triton_kernel.lora.lora_prefill import lora_get_qkvo_fwd_shrink, lora_get_qkvo_fwd_expand
+from dserve.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
+from dserve.utils.infer_utils import mark_cost_time
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve._kernels import dispatch_bgmv
 from ...server.router.mixed_req_queue import rprint
 
 class LoraUnorderedBatchInfer:

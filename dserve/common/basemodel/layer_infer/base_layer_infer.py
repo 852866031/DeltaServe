@@ -1,6 +1,6 @@
-from slora.utils.infer_utils import mark_cost_time
-from slora.common.basemodel.infer_struct import InferStateInfo
-from slora.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
+from dserve.utils.infer_utils import mark_cost_time
+from dserve.common.basemodel.infer_struct import InferStateInfo
+from dserve.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
 
 class BaseLayerInfer:
 

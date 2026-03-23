@@ -4,14 +4,14 @@ import torch.distributed as dist
 import numpy as np
 import triton
 
-from slora.models.llama3.layer_weights.transformer_layer_weight import Llama3TransformerLayerWeight
-from slora.models.llama2.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from slora.models.llama2.triton_kernel.token_attention_nopad_att1 import token_att_fwd
-from slora.models.llama2.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
-from slora.models.llama2.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2
-from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from slora.models.llama.infer_struct import LlamaInferStateInfo
-from slora.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from dserve.models.llama3.layer_weights.transformer_layer_weight import Llama3TransformerLayerWeight
+from dserve.models.llama2.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from dserve.models.llama2.triton_kernel.token_attention_nopad_att1 import token_att_fwd
+from dserve.models.llama2.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
+from dserve.models.llama2.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2
+from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from dserve.models.llama.infer_struct import LlamaInferStateInfo
+from dserve.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
 class Llama3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
@@ -112,7 +112,7 @@ class Llama3TransformerLayerInfer(LlamaTransformerLayerInfer):
             return o_tensor
         elif triton.__version__ >= "2.1.0":
             o_tensor = torch.empty_like(q)
-            from slora.models.llama2.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
+            from dserve.models.llama2.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
             token_softmax_reducev_fwd(att_m_tensor, 
                                       infer_state.mem_manager.value_buffer[self.layer_num_],
                                       o_tensor.view(calcu_shape1),

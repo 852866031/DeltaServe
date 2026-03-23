@@ -41,8 +41,8 @@ from .httpserver.manager import HttpServerManager
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 
-from slora.utils.net_utils import alloc_can_use_network_port
-from slora.common.configs.config import setting
+from dserve.utils.net_utils import alloc_can_use_network_port
+from dserve.common.configs.config import setting
 from .api_models import (
     ChatCompletionRequest,
     UsageInfo,
@@ -54,8 +54,8 @@ from .api_models import (
     ChatCompletionStreamResponseChoice,
 )
 
-from slora.mprophet.measure import ModelProphet
-from slora.mprophet.lora_stats import LoRAProphet
+from dserve.mprophet.measure import ModelProphet
+from dserve.mprophet.lora_stats import LoRAProphet
 
 
 GB = 1024 ** 3

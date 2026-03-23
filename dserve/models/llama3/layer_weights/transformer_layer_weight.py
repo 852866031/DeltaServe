@@ -1,9 +1,9 @@
 import torch
 import math
 import numpy as np
-from slora.common.basemodel import TransformerLayerWeight
+from dserve.common.basemodel import TransformerLayerWeight
 
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 class Llama3TransformerLayerWeight(LlamaTransformerLayerWeight):
     def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):

@@ -1,9 +1,9 @@
 
 import torch.nn.functional as F
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 import torch
 import math
-from slora._kernels import dispatch_bgmv
+from dserve._kernels import dispatch_bgmv
 
 import torch
 

@@ -3,15 +3,15 @@ import json
 import torch
 from typing import final
 
-from slora.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-from slora.common.basemodel.infer_struct import InferStateInfo
-from slora.common.mem_allocator import MemoryAllocator
-from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
-from slora.common.infer_utils import init_bloc
-from slora.common.build_utils import repair_config
-from slora.utils.model_load import hf_load_config
+from dserve.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
+from dserve.common.basemodel.infer_struct import InferStateInfo
+from dserve.common.mem_allocator import MemoryAllocator
+from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator
+from dserve.common.infer_utils import init_bloc
+from dserve.common.build_utils import repair_config
+from dserve.utils.model_load import hf_load_config
 
-from slora.mprophet.model_config import get_config_json
+from dserve.mprophet.model_config import get_config_json
 
 
 class TpPartBaseModel:

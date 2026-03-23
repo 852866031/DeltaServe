@@ -1,7 +1,7 @@
 import gc
 import torch
 from typing import List, Tuple
-from slora.server.router.mixed_req_queue import rprint
+from dserve.server.router.mixed_req_queue import rprint
 import torch.nn.functional as F
 
 # TODO: will it slow down the program?

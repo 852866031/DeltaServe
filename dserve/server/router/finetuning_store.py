@@ -4,8 +4,8 @@ from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple
 import datetime
 import numpy as np
-from slora.server.io_struct import Batch, Req
-from slora.server.sampling_params import SamplingParams
+from dserve.server.io_struct import Batch, Req
+from dserve.server.sampling_params import SamplingParams
 
 
 def get_finetuning_sampling_params() -> SamplingParams:

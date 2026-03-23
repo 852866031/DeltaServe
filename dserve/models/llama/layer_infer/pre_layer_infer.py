@@ -1,10 +1,10 @@
 import torch
 import torch.distributed as dist
 
-from slora.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
-from slora.models.llama.infer_struct import LlamaInferStateInfo
-from slora.common.basemodel import PreLayerInferTpl
-from slora.utils.infer_utils import mark_cost_time
+from dserve.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from dserve.models.llama.infer_struct import LlamaInferStateInfo
+from dserve.common.basemodel import PreLayerInferTpl
+from dserve.utils.infer_utils import mark_cost_time
 
 
 class LlamaPreLayerInfer(PreLayerInferTpl):

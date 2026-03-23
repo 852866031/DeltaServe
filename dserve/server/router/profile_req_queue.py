@@ -6,7 +6,7 @@ import uuid
 import numpy as np
 from typing import List, Optional
 
-from slora.server.router.finetuning_store import FinetuningManager
+from dserve.server.router.finetuning_store import FinetuningManager
 
 # Example import if you have a local definition:
 # from ..io_struct import Batch, Req
@@ -16,7 +16,7 @@ from ..input_params import FinetuneParams, SLOParams
 from ..sampling_params import SamplingParams
 
 # If using the original time calculation decorator
-# from slora.utils.infer_utils import calculate_time
+# from dserve.utils.infer_utils import calculate_time
 
 max_new_tokens_default = 40
 inference_requests_length_default = 50

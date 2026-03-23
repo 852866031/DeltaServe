@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 import numpy as np
-from slora.common.unified_mem_allocator import PageType, UnifiedMemoryAllocator
+from dserve.common.unified_mem_allocator import PageType, UnifiedMemoryAllocator
 import torch
 from typing import List, Dict, Any
 import time
 
-from slora.common.mem_allocator import MemoryAllocator
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve.common.mem_allocator import MemoryAllocator
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
 
 
 @dataclass

@@ -3,11 +3,11 @@ import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 
-from slora.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from dserve.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from einops import rearrange
-from slora.models.llama.infer_struct import LlamaInferStateInfo
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
-from slora.common.basemodel import PostLayerInferTpl
+from dserve.models.llama.infer_struct import LlamaInferStateInfo
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from dserve.common.basemodel import PostLayerInferTpl
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
     """

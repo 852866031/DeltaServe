@@ -3,8 +3,8 @@ import asyncio
 import numpy as np
 from typing import List
 from ..io_struct import Batch, Req
-from slora.server.router.req_queue import ReqQueue
-from slora.utils.infer_utils import  calculate_time
+from dserve.server.router.req_queue import ReqQueue
+from dserve.utils.infer_utils import  calculate_time
 
 
 class ClusterReqQueue(ReqQueue):

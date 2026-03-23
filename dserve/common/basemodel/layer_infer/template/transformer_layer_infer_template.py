@@ -2,8 +2,8 @@ import torch
 import torch.distributed as dist
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
-from slora.utils.infer_utils import mark_cost_time
-from slora.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+from dserve.utils.infer_utils import mark_cost_time
+from dserve.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from typing import Tuple
 
 

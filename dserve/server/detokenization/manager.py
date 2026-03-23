@@ -9,7 +9,7 @@ from .decode import decode_token
 from ..tokenizer import get_tokenizer
 import traceback
 
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
 
 class DeTokenizationManager:
     

@@ -1,5 +1,5 @@
 import re
-from slora.utils.model_load import hf_load_config
+from dserve.utils.model_load import hf_load_config
 
 
 class LoRAConfig:

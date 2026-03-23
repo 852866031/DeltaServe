@@ -3,8 +3,8 @@ import itertools
 
 import torch
 
-import slora._kernels
-from slora.models.peft.triton_kernel.lora.lora_decode import lora_get_qkvo_fwd_expand, lora_get_qkvo_fwd_shrink
+import dserve._kernels
+from dserve.models.peft.triton_kernel.lora.lora_decode import lora_get_qkvo_fwd_expand, lora_get_qkvo_fwd_shrink
 
 from benchmark_utils import bench, gc_torch
 
@@ -250,14 +250,14 @@ def bench_ggemm_A():
       # test correctness
       gemm(operation, arguments)
       arguments.sync()
-      slora._kernels.dispatch_bgmv(
+      dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale)
       assert_close(t.y_ref, t.y)
 
       result = bench(lambda: gemm(operation, arguments))
       outputs.append(f"\n gemm: {result.avg()*1e6:3.0f}us±{result.std()*1e6:3.0f}us")
 
-      result2 = bench(lambda: slora._kernels.dispatch_bgmv(
+      result2 = bench(lambda: dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale))
       outputs.append(f"\n bgmv: {result2.avg()*1e6:3.0f}us±{result2.std()*1e6:3.0f}us")
     except torch.cuda.OutOfMemoryError:
@@ -324,14 +324,14 @@ def bench_ggemm_B():
       # test correctness
       gemm(operation, arguments)
       arguments.sync()
-      slora._kernels.dispatch_bgmv(
+      dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale)
       assert_close(t.y_ref, t.y)
 
       result = bench(lambda: gemm(operation, arguments))
       outputs.append(f"\n gemm: {result.avg()*1e6:3.0f}us±{result.std()*1e6:3.0f}us")
 
-      result2 = bench(lambda: slora._kernels.dispatch_bgmv(
+      result2 = bench(lambda: dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale))
       outputs.append(f"\n bgmv: {result2.avg()*1e6:3.0f}us±{result2.std()*1e6:3.0f}us")
     except torch.cuda.OutOfMemoryError:
@@ -450,7 +450,7 @@ def bench_ggemm_A_multi():
       padded_tensor = [torch.cat((tensor, torch.zeros(len(tensor), max(lora_random_req) - tensor.shape[1], dtype=tensor.dtype, device=device)), dim=1) for tensor in t.y]
       y_concat = torch.cat(padded_tensor, dim=0)
       assert(len(y_concat) == len(t.y_ref))
-      slora._kernels.dispatch_bgmv(
+      dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale)
       lora_get_qkvo_fwd_shrink(t.x, t.w_T_all.view(-1, weight_size), t.y_test, t.cell_indicies, 
                                t.start_indicies, t.lora_ranks, t.b_start_loc, 
@@ -465,7 +465,7 @@ def bench_ggemm_A_multi():
       result = bench(lambda: gemm(operation, arguments))
       outputs.append(f"\n gemm: {result.avg()*1e6:3.0f}us±{result.std()*1e6:3.0f}us")
 
-      result2 = bench(lambda: slora._kernels.dispatch_bgmv(
+      result2 = bench(lambda: dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x, t.w_T_all.view(-1, 32, 4096//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale))
       outputs.append(f"\n bgmv: {result2.avg()*1e6:3.0f}us±{result2.std()*1e6:3.0f}us")
 
@@ -594,7 +594,7 @@ def bench_ggemm_B_multi():
       # test correctness
       gemm(operation, arguments)
       arguments.sync()
-      slora._kernels.dispatch_bgmv(
+      dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x_cat, t.w_T_all.view(-1, 32, weight_size//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale)
       lora_get_qkvo_fwd_expand(t.x_cat, t.w_T_all.view(-1, weight_size), t.y_test, t.scale, t.cell_indicies, 
                                t.start_indicies, t.lora_ranks, t.b_start_loc, 
@@ -612,7 +612,7 @@ def bench_ggemm_B_multi():
       result = bench(lambda: gemm(operation, arguments))
       outputs.append(f"\n gemm: {result.avg()*1e6:3.0f}us±{result.std()*1e6:3.0f}us")
 
-      result2 = bench(lambda: slora._kernels.dispatch_bgmv(
+      result2 = bench(lambda: dserve._kernels.dispatch_bgmv(
           t.y_ref, t.x_cat, t.w_T_all.view(-1, 32, weight_size//32), t.start_indicies, t.lora_ranks, t.cell_indicies, t.indicies, 0, t.scale))
       outputs.append(f"\n bgmv: {result2.avg()*1e6:3.0f}us±{result2.std()*1e6:3.0f}us")
 

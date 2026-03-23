@@ -4,7 +4,7 @@ import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 import time
 import numpy as np
-from slora.server.io_struct import Req
+from dserve.server.io_struct import Req
 from enum import Enum
 import csv
 import json

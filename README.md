@@ -1,15 +1,13 @@
 # DeltaServe
 
-Extend on [S-LoRA](https://github.com/S-LoRA/S-LoRA)
+DeltaServe is built on and adapted from [S-LoRA](https://github.com/S-LoRA/S-LoRA)
 
 ```
 conda create -n dserve python=3.9
 conda activate dserve 
 # cuda > 12.6
-pip install torch==2.8.0
-pip install uvloop==0.21.0
+pip install torch==2.8.0 triton==3.4.0
 pip install -e . --no-build-isolation
-pip install triton==3.4.0
 ```
 
 To use the plotting scripts, you also need to install 

@@ -1,19 +1,19 @@
 import os
 import json
-from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
-from slora.models.llama.SFT_service import LlamaSFTBackwardService
+from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator
+from dserve.models.llama.SFT_service import LlamaSFTBackwardService
 import torch
-from slora.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from slora.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-from slora.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from slora.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
+from dserve.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+from dserve.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from dserve.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
-from slora.models.llama.infer_struct import LlamaInferStateInfo
-# from slora.common.mem_manager import MemoryManager
-from slora.common.mem_allocator import MemoryAllocator
-from slora.common.int8kv_mem_manager import INT8KVMemoryManager
-from slora.common.basemodel import TpPartBaseModel
+from dserve.models.llama.infer_struct import LlamaInferStateInfo
+# from dserve.common.mem_manager import MemoryManager
+from dserve.common.mem_allocator import MemoryAllocator
+from dserve.common.int8kv_mem_manager import INT8KVMemoryManager
+from dserve.common.basemodel import TpPartBaseModel
 
 
 class LlamaTpPartModel(TpPartBaseModel):

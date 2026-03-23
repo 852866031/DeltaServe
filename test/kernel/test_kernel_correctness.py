@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-from slora._kernels import dispatch_bgmv
+from dserve._kernels import dispatch_bgmv
 
 
 @triton.jit

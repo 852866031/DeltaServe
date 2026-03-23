@@ -1,24 +1,24 @@
 import time
 import numpy as np
-from slora.common.unified_mem_allocator import PageType
-from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
-from slora.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
+from dserve.common.unified_mem_allocator import PageType
+from dserve.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from dserve.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from dserve.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
 import torch
 import torch.nn as nn
 from typing import final
 from typing import Tuple
-from slora.common.infer_utils import init_bloc
-from slora.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from slora.models.peft.triton_kernel.lora.lora_prefill import lora_get_qkvo_fwd_shrink, lora_get_qkvo_fwd_expand
-from slora.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
-from slora.utils.infer_utils import mark_cost_time, set_random_seed
-from slora.utils.infer_utils import calculate_time, mark_start, mark_end
-from slora._kernels import dispatch_bgmv
+from dserve.common.infer_utils import init_bloc
+from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from dserve.models.peft.triton_kernel.lora.lora_prefill import lora_get_qkvo_fwd_shrink, lora_get_qkvo_fwd_expand
+from dserve.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
+from dserve.utils.infer_utils import mark_cost_time, set_random_seed
+from dserve.utils.infer_utils import calculate_time, mark_start, mark_end
+from dserve._kernels import dispatch_bgmv
 from ...server.router.mixed_req_queue import rprint
 import hashlib
-from slora.models.peft.alt_to_slora_kernel import dispatch_bgmv_pt, compare_tensors, dispatch_bgmv_pt_exact
+from dserve.models.peft.alt_to_slora_kernel import dispatch_bgmv_pt, compare_tensors, dispatch_bgmv_pt_exact
 import math
 
 

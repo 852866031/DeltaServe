@@ -1,13 +1,13 @@
 import os
 import json
-from slora.common.build_utils import repair_config
-from slora.models.llama3.SFT_service import Llama3SFTBackwardService
+from dserve.common.build_utils import repair_config
+from dserve.models.llama3.SFT_service import Llama3SFTBackwardService
 import torch
 
-from slora.models.llama3.layer_infer.transformer_layer_infer import Llama3TransformerLayerInfer
-from slora.models.llama3.layer_weights.transformer_layer_weight import Llama3TransformerLayerWeight
+from dserve.models.llama3.layer_infer.transformer_layer_infer import Llama3TransformerLayerInfer
+from dserve.models.llama3.layer_weights.transformer_layer_weight import Llama3TransformerLayerWeight
 
-from slora.models.llama.model import LlamaTpPartModel
+from dserve.models.llama.model import LlamaTpPartModel
 
 
 class Llama3TpPartModel(LlamaTpPartModel):

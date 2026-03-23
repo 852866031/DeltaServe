@@ -1,7 +1,7 @@
 import gc
 import torch
 import torch.nn as nn
-from slora.server.router.mixed_req_queue import rprint
+from dserve.server.router.mixed_req_queue import rprint
 from pprint import pprint
 
 class LoraLayerWeight:
