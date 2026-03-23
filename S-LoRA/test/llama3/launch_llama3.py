@@ -101,7 +101,7 @@ if __name__ == "__main__":
                         help="Enable CUDA graph capture for decode steps")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--ft_log_path", type=str, default="/mnt/weka/home/jianshu.she/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
+    parser.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
 
     args = parser.parse_args()
 

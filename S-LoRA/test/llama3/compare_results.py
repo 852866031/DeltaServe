@@ -96,14 +96,14 @@ def percentile_curve(values: np.ndarray):
     return pct, sorted_vals
 
 
-def add_box(ax, text, xy=(0.02, 0.96), fontsize=11):
+def add_box(ax, text, xy=(0.5, 0.98), fontsize=11):
     ax.text(
         xy[0],
         xy[1],
         text,
         transform=ax.transAxes,
         va="top",
-        ha="left",
+        ha="center",
         fontsize=fontsize,
         family="monospace",
         bbox=dict(
@@ -203,9 +203,8 @@ def make_plot(
     if np.isfinite(delta_latency):
         pct_text = f"{delta_latency_pct:+.1f}%" if np.isfinite(delta_latency_pct) else "n/a"
         add_box(
-            ax2,
+            ax1,
             f"Δ Avg Latency: {delta_latency:+.3f}s ({pct_text})",
-            xy=(0.20, 0.94),
             fontsize=11,
         )
 
