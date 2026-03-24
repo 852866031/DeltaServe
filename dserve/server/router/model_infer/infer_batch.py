@@ -62,10 +62,7 @@ class InferBatch:
     # nopad_b_start_loc[0] nopad_b_seq_len[0]
     # ith request in the batch: nopad_b_loc[nopad_b_start_loc[i]: nopad_b_start_loc[i] + nopad_b_seq_len[i]]
     # DO NOT CROSS REQUEST ATTENTION SCORE
-
-
-    mem_manager: MemoryManager
-    alt_mem_manager: UnifiedMemoryAllocator
+    mem_manager: UnifiedMemoryAllocator
 
     nopad_b_loc_key: torch.Tensor
     nopad_b_loc_value: torch.Tensor
@@ -77,8 +74,7 @@ class InferBatch:
 
     @classmethod
     @torch.no_grad()
-    def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager: MemoryManager, vocab_size: int, 
-                   alt_mem_manager: UnifiedMemoryAllocator = None):
+    def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager: MemoryManager, vocab_size: int):
         input_lengths = []
         all_input_ids = []
         requests_idx_mapping = {}
@@ -107,10 +103,7 @@ class InferBatch:
 
             if is_finetuning:
                 full_input_tensor = torch.tensor(tokenized_input, dtype=torch.int64, device=device)
-                if alt_mem_manager is not None:
-                    alt_mem_manager.finetune_input_ids.append(full_input_tensor)
-                else:
-                    mem_manager.finetune_input_ids.append(full_input_tensor)
+                mem_manager.finetune_input_ids.append(full_input_tensor)
 
             if (is_finetuning or is_reference) and len(tokenized_input) > 1:
                 tokenized_input = tokenized_input[:-1]
@@ -119,12 +112,8 @@ class InferBatch:
                 mask_tensor = torch.tensor(r.get("completion_mask"),           
                            dtype=torch.bool,          
                            device="cuda")   
-                if alt_mem_manager is not None:
-                    alt_mem_manager.alignment_completion_masks.append(mask_tensor)
-                    alt_mem_manager.alignment_labels.append(r.get("label"))
-                else:
-                    mem_manager.alignment_completion_masks.append(mask_tensor)
-                    mem_manager.alignment_labels.append(r.get("label"))
+                mem_manager.alignment_completion_masks.append(mask_tensor)
+                mem_manager.alignment_labels.append(r.get("label"))
 
             input_length = len(tokenized_input)
             input_lengths.append(input_length)
@@ -175,7 +164,6 @@ class InferBatch:
             out_token_id_counts=out_token_id_counts,
             sampling_param_list=sampling_param_list,
             mem_manager=mem_manager,
-            alt_mem_manager=alt_mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=finetune_mask,
             ref_mask = ref_mask
@@ -189,20 +177,12 @@ class InferBatch:
     
     @torch.no_grad()
     def free_self(self):
-        if self.alt_mem_manager is not None:
-            # Alt memory manager free
-            remove_index = []
-            for idx in range(len(self)):
-                remove_index.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-                remove_index.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-            remove_index = torch.cat(remove_index, dim=-1)
-            self.alt_mem_manager.free(remove_index)
-        else:
-            remove_index = []
-            for idx in range(len(self)):
-                remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-            remove_index = torch.cat(remove_index, dim=-1)
-            self.mem_manager.free(remove_index)
+        remove_index = []
+        for idx in range(len(self)):
+            remove_index.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+            remove_index.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+        remove_index = torch.cat(remove_index, dim=-1)
+        self.mem_manager.free(remove_index)
         return
         
     # @calculate_time(show=True, min_cost_ms=0)
@@ -235,22 +215,13 @@ class InferBatch:
             left_idx.append(idx)
         
         left_idx_set = set(left_idx)
-        if self.alt_mem_manager is not None:
-            remove_index_kv = []
-            for idx in range(len(self)):
-                if idx not in left_idx_set:
-                    remove_index_kv.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-                    remove_index_kv.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-            remove_index_kv = torch.cat(remove_index_kv, dim=-1)
-            self.alt_mem_manager.free(remove_index_kv)
-        else:
-            remove_index = []
-            for idx in range(len(self)):
-                if idx not in left_idx_set:
-                    remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-            remove_index = torch.cat(remove_index, dim=-1)
-            print("filter free mem manager", len(remove_index))
-            self.mem_manager.free(remove_index)
+        remove_index_kv = []
+        for idx in range(len(self)):
+            if idx not in left_idx_set:
+                remove_index_kv.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+                remove_index_kv.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+        remove_index_kv = torch.cat(remove_index_kv, dim=-1)
+        self.mem_manager.free(remove_index_kv)
 
 
         nopad_max_len_in_batch = 0
@@ -294,7 +265,6 @@ class InferBatch:
             out_token_id_counts=[self.out_token_id_counts[_i] for _i in indices],
             sampling_param_list=[self.sampling_param_list[_i] for _i in indices],
             mem_manager=self.mem_manager,
-            alt_mem_manager=self.alt_mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
             ref_mask= None
@@ -315,31 +285,20 @@ class InferBatch:
 
         # --- Step 2: free dropped requests' memory ---
         if drop_indices:
-            if self.alt_mem_manager is not None:
-                remove_index_kv = []
-                for idx in drop_indices:
-                    remove_index_kv.append(
-                        self.nopad_b_loc_key[idx,
-                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
-                            (self.nopad_max_len_in_batch - 1)]
-                    )
-                    remove_index_kv.append(
-                        self.nopad_b_loc_value[idx,
-                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
-                            (self.nopad_max_len_in_batch - 1)]
-                    )
-                remove_index_kv = torch.cat(remove_index_kv, dim=-1)
-                self.alt_mem_manager.free(remove_index_kv)
-            else:
-                remove_index = []
-                for idx in drop_indices:
-                    remove_index.append(
-                        self.nopad_b_loc[idx,
-                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
-                            (self.nopad_max_len_in_batch - 1)]
-                    )
-                remove_index = torch.cat(remove_index, dim=-1)
-                self.mem_manager.free(remove_index)
+            remove_index_kv = []
+            for idx in drop_indices:
+                remove_index_kv.append(
+                    self.nopad_b_loc_key[idx,
+                        (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
+                        (self.nopad_max_len_in_batch - 1)]
+                )
+                remove_index_kv.append(
+                    self.nopad_b_loc_value[idx,
+                        (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
+                        (self.nopad_max_len_in_batch - 1)]
+                )
+            remove_index_kv = torch.cat(remove_index_kv, dim=-1)
+            self.mem_manager.free(remove_index_kv)
 
         # --- Step 3: recompute metadata for survivors ---
         new_seq_len = self.nopad_b_seq_len[keep_tensor]
@@ -387,7 +346,6 @@ class InferBatch:
             out_token_id_counts=self.out_token_id_counts[:x],
             sampling_param_list=self.sampling_param_list[:x],
             mem_manager=self.mem_manager,
-            alt_mem_manager=self.alt_mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
             ref_mask=None,
@@ -472,7 +430,6 @@ class InferBatch:
             out_token_id_counts=out_token_id_counts,
             sampling_param_list=sampling_param_list,
             mem_manager=batches[0].mem_manager,
-            alt_mem_manager=batches[0].alt_mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
             ref_mask = None

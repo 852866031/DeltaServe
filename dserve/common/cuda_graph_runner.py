@@ -81,7 +81,7 @@ class CudaGraphRunner:
 
     def capture(self, batch_size, max_len_in_batch, token_forward_fn,
                 input_ids, infer_state, forward_kwargs) -> torch.Tensor:
-        infer_state.alt_mem_manager.page_table_lock.acquire()
+        infer_state.mem_manager.page_table_lock.acquire()
         ml_bucket = self.get_max_len_bucket(max_len_in_batch)
         cache_key = (batch_size, ml_bucket)
 
@@ -183,7 +183,7 @@ class CudaGraphRunner:
         }
 
         self._cache[cache_key] = (graph, input_buffers, static_output, ml_bucket)
-        infer_state.alt_mem_manager.page_table_lock.release()
+        infer_state.mem_manager.page_table_lock.release()
         return static_output[:batch_size]
 
     def replay(self, batch_size, max_len_in_batch, input_ids, infer_state) -> torch.Tensor:

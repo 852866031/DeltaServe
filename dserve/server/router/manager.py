@@ -88,7 +88,7 @@ class RouterManager:
                  router_port, detokenization_port, model_rpc_ports,
                  input_params,
                  mode=[], log_stats=True, log_stats_interval=10, half_model=False, 
-                 mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
+                 mem_manager_log_path=None, unified_mem_manager_max_size=0,
                  enable_gpu_profile=False, rank_id=0):
         self.model_weightdir = weightdir
         self.adapter_dirs = adapter_dirs
@@ -101,7 +101,6 @@ class RouterManager:
         self.no_inference_since = time.time()
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
-        self.enable_unified_mem_manager = enable_unified_mem_manager
         self.unified_mem_manager_max_size = unified_mem_manager_max_size
         self.update_sent = False
 
@@ -173,7 +172,6 @@ class RouterManager:
                     prefetch_stream=self.prefetch_stream,
                     half_model=self.half_model,
                     mem_manager_log_path=self.mem_manager_log_path,
-                    enable_unified_mem_manager=self.enable_unified_mem_manager,
                     unified_mem_manager_max_size=self.unified_mem_manager_max_size,
                     gpu_profiler=self.gpu_profiler
                 ))
@@ -465,13 +463,6 @@ class RouterManager:
                     adapter_to_keep.add(req.adapter_dir)
         if has_new_finished_req:
             batch.filter_finished()
-            # unmerge adapter from base model
-            if self.input_params.scheduler == "peft" and batch.is_clear():
-                ret = []
-                for tp_rank in range(self.world_size):
-                    ret.append(self.model_rpcs[tp_rank].unmerge_adapter())
-                await asyncio.gather(*ret)
-
             if not minibatch and not self.input_params.no_lora and not has_ft_reqs:
                 #print(" _handle_finish_req Offloading adapters...")
                 ret = []
@@ -705,7 +696,6 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
             log_stats_interval = args.log_stats_interval,
             half_model=args.half_model,
             mem_manager_log_path=args.mem_manager_log_path,
-            enable_unified_mem_manager=args.enable_unified_mem_manager,
             unified_mem_manager_max_size=args.unified_mem_manager_max_size,
             enable_gpu_profile=args.enable_gpu_profile
         )

@@ -6,7 +6,7 @@ import triton
 
 from dserve.models.llama3.layer_weights.transformer_layer_weight import Llama3TransformerLayerWeight
 from dserve.models.llama2.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from dserve.models.llama2.triton_kernel.token_attention_nopad_att1 import token_att_fwd
+from dserve.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd
 from dserve.models.llama2.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
 from dserve.models.llama2.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2
 from dserve.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -73,54 +73,3 @@ class Llama3TransformerLayerInfer(LlamaTransformerLayerInfer):
                               infer_state.b_seq_len,
                               infer_state.max_len_in_batch)
         return o_tensor
-    
-    # gqa attention
-    def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):
-        total_token_num = infer_state.total_token_num
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-
-        # For CUDA graph compatibility, use pre-allocated att_m buffer if available
-        if hasattr(infer_state, '_att_m_buffers') and infer_state._att_m_buffers is not None:
-            att_m_tensor = infer_state._att_m_buffers[self.layer_num_]
-        else:
-            att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
-
-        token_att_fwd(q.view(calcu_shape1),
-                      infer_state.mem_manager.key_buffer[self.layer_num_],
-                      att_m_tensor,
-                      infer_state.b_loc,
-                      infer_state.b_start_loc,
-                      infer_state.b_seq_len,
-                      infer_state.max_len_in_batch)
-        
-        if triton.__version__ == "2.0.0":
-            prob = torch.empty_like(att_m_tensor)
-            token_softmax_fwd(att_m_tensor, infer_state.b_start_loc, infer_state.b_seq_len, prob, infer_state.max_len_in_batch)
-            att_m_tensor = None
-
-            o_tensor = torch.empty_like(q)
-
-            token_att_fwd2(prob,
-                        infer_state.mem_manager.value_buffer[self.layer_num_],
-                        o_tensor.view(calcu_shape1),
-                        infer_state.b_loc,
-                        infer_state.b_start_loc,
-                        infer_state.b_seq_len,
-                        infer_state.max_len_in_batch)
-            prob = None
-            return o_tensor
-        elif triton.__version__ >= "2.1.0":
-            o_tensor = torch.empty_like(q)
-            from dserve.models.llama2.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
-            token_softmax_reducev_fwd(att_m_tensor, 
-                                      infer_state.mem_manager.value_buffer[self.layer_num_],
-                                      o_tensor.view(calcu_shape1),
-                                      infer_state.b_loc,
-                                      infer_state.b_start_loc,
-                                      infer_state.b_seq_len,
-                                      infer_state.max_len_in_batch,
-                                      infer_state.other_kv_index)
-            return o_tensor
-        else:
-            raise Exception("not support triton version")

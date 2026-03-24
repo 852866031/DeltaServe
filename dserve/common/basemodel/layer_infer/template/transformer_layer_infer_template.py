@@ -36,18 +36,10 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             return cache_k, cache_v
         # decode cache_k cache_v
         else:
-            if infer_state.alt_mem_manager is not None:
-                if infer_state.decode_is_contiguous:
-                    kv_heads = self.tp_k_head_num_
-                    cache_k = infer_state.alt_mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_key:infer_state.decode_mem_end_key, :kv_heads, :]
-                    cache_v = infer_state.alt_mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_value:infer_state.decode_mem_end_value, :kv_heads, :]
-                else:
-                    cache_k = infer_state.decode_key_buffer
-                    cache_v = infer_state.decode_value_buffer
-                return cache_k, cache_v
             if infer_state.decode_is_contiguous:
-                cache_k = infer_state.mem_manager.key_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
-                cache_v = infer_state.mem_manager.value_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
+                kv_heads = self.tp_k_head_num_
+                cache_k = infer_state.mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_key:infer_state.decode_mem_end_key, :kv_heads, :]
+                cache_v = infer_state.mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_value:infer_state.decode_mem_end_value, :kv_heads, :]
             else:
                 cache_k = infer_state.decode_key_buffer
                 cache_v = infer_state.decode_value_buffer

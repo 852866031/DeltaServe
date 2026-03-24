@@ -20,7 +20,6 @@ class InferAdapter:
 
     # adapter_ids_lora_a: List[int]  # adapter_ids_lora_a[i] is the indices of adapter i in a_loc_lora_a
     # adapter_ids_lora_b: List[int]  # adapter_ids_lora_b[i] is the indices of adapter i in a_loc_lora_b
-    # alt_mem_manager: UnifiedMemoryAllocator 
 
     idx_map: Dict[str, int]
     prefetch_tag: Dict[str, int]
@@ -98,7 +97,6 @@ class InferAdapter:
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.key_buffer[i][loc] = w_combined[0]
-            #self.alt_mem_manager.pool[i][loc] = w_combined[0]     # alt unified manager
             #print("Access key buffer from InferAdapter")
             adapter.layers[i].offload_from_gpu()
 

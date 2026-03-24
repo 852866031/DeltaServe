@@ -29,7 +29,7 @@ class TpPartBaseModel:
 
     def __init__(self, tp_rank, world_size, weight_dir,
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
-                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0):
+                 half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
@@ -40,7 +40,6 @@ class TpPartBaseModel:
         self.dummy = dummy
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
-        self.enable_unified_mem_manager = enable_unified_mem_manager
         self.unified_mem_manager_max_size = unified_mem_manager_max_size
         self._init_config()
         if self.half_model:
@@ -94,14 +93,7 @@ class TpPartBaseModel:
     
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.world_size_ == 0
-        self.mem_manager = MemoryAllocator(
-                            tot_size=self.max_total_token_num + self.mem_adapter_size,
-                            cache_size=self.max_total_token_num, 
-                            dtype=torch.float16,
-                            head_num=self.config["num_attention_heads"] // self.world_size_,
-                            head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
-                            layer_num=self.config["n_layer"])
-        self.alt_mem_manager = UnifiedMemoryAllocator(
+        self.mem_manager = UnifiedMemoryAllocator(
                             tot_size=self.max_total_token_num + self.mem_adapter_size,
                             dtype=torch.float16,
                             hidden_dim=self.config["n_embed"],

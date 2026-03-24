@@ -8,6 +8,7 @@ import rpyc
 from dserve.models.llama.SFT_service import LlamaSFTBackwardService
 from dserve.models.llama3.model import Llama3TpPartModel
 import torch
+import torch.distributed as dist
 import traceback
 import time
 import os
@@ -27,10 +28,7 @@ from dserve.common.configs.config import setting
 from dserve.models.llama.model import LlamaTpPartModel
 from dserve.models.llama2.model import Llama2TpPartModel
 from dserve.models.peft.lora_adapter import LoraTpPartAdapter
-from dserve.models.peft.lora_unordered_batch_infer import LoraUnorderedBatchInfer
 from dserve.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
-from dserve.models.peft.lora_single_batch_infer import LoraPEFTBatchInfer
-from dserve.models.bmm.lora_bmm_infer import LoraBmmInfer
 from dserve.server.router.model_infer.infer_adapter import InferAdapter
 from dserve.server.router.model_infer.infer_adapter_alt import InferAdapterAlt
 from dserve.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
@@ -54,9 +52,7 @@ class ModelRpcServer(rpyc.Service):
                            max_total_token_num, load_way, mode, input_params,
 			   prefetch_stream, 
                half_model=False, mem_manager_log_path=None, 
-               enable_unified_mem_manager=False, gpu_profiler=None, unified_mem_manager_max_size=0, use_rank_id=0):
-        import torch
-        import torch.distributed as dist
+               gpu_profiler=None, unified_mem_manager_max_size=0, use_rank_id=0):
         if world_size != 1:
             trans_list = [obtain(e) for e in (rank_id, world_size, weight_dir, adapter_dirs,
                                               max_total_token_num, load_way, mode)]
@@ -74,7 +70,6 @@ class ModelRpcServer(rpyc.Service):
         self.cache = {}
         self.original_weights = {}
         self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-        self.enable_unified_mem_manager = enable_unified_mem_manager
         nccl_port = setting[f"nccl_port_{use_rank_id}"]
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{nccl_port}', rank=rank_id, world_size=world_size)
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
@@ -91,7 +86,6 @@ class ModelRpcServer(rpyc.Service):
                                                     dummy=input_params.dummy, 
                                                     half_model=half_model, 
                                                     mem_manager_log_path=mem_manager_log_path,
-                                                    enable_unified_mem_manager=enable_unified_mem_manager,
                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
                 elif "num_key_value_heads" in model_cfg.keys():
                     self.model = Llama2TpPartModel(rank_id, world_size, weight_dir,
@@ -108,7 +102,6 @@ class ModelRpcServer(rpyc.Service):
                                                     dummy=input_params.dummy, 
                                                     half_model=half_model, 
                                                     mem_manager_log_path=mem_manager_log_path,
-                                                    enable_unified_mem_manager=enable_unified_mem_manager,
                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
                     if gpu_profiler is not None: gpu_profiler.mark_annotation("model_load")
             else:
@@ -121,13 +114,11 @@ class ModelRpcServer(rpyc.Service):
         ''' init adapters '''
         self.adapters = []
         self.adapter_id = {}
-        target_adapter_dir = None
         num = 0
         print(f"Prepare to load {len(adapter_dirs)} adapters")
         for adapter_dir in tqdm(adapter_dirs, desc="load adapters"):
             print(f"Adding adapter from {adapter_dir}, number {num}")
             num += 1
-            target_adapter_dir = adapter_dir
             self.adapter_id[adapter_dir] = len(self.adapters)
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, adapter_dir, model_cfg,
                                                    swap=input_params.swap, dummy=input_params.dummy,
@@ -174,7 +165,7 @@ class ModelRpcServer(rpyc.Service):
                 os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)
                 os.environ.pop("CUDA_DEVICE_MAX_CONNECTIONS", None)
                 self.rpc_send.send(self.finetuning_adapter.load_gpu_fp32_dict())
-                self.rpc_send.send(self.model.alt_mem_manager.share_activation_dict())
+                self.rpc_send.send(self.model.mem_manager.share_activation_dict())
                 self.rpc_recv.recv()
 
             if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
@@ -197,64 +188,34 @@ class ModelRpcServer(rpyc.Service):
                                                         head_num,
                                                         self.model.config["hidden_size"] // head_num)
         else:
-            if self.enable_unified_mem_manager:
-                self.infer_adapter_alt = InferAdapterAlt.init(self.model.alt_mem_manager)
-                self.infer_adapter = None
-            else:
-                self.infer_adapter = InferAdapter.init(self.model.mem_manager,
-                                                    prefetch_stream)
-                self.infer_adapter_alt = None
-        ''' finish init adapters '''
+            self.infer_adapter = InferAdapterAlt.init(self.model.mem_manager)
+           
         set_random_seed(2147483647)
         return
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
-        if not self.input_params.bmm:
-            adapters = []
-            for adapter_dir in adapter_dirs:
-                if adapter_dir is not None:
-                    adapters.append(self.adapters[self.adapter_id[adapter_dir]])
-            if self.enable_unified_mem_manager:
-                self.infer_adapter_alt.load_adapters(adapters)
-            else:
-                self.infer_adapter.load_adapters(adapters, prefetch=prefetch)
-
-        else:
-            for adapter_dir in adapter_dirs:
-                if adapter_dir is not None:
-                    self.adapters[self.adapter_id[adapter_dir]].load_to_gpu(prefetch=prefetch, bmm=True)
-            print(f"load {len(adapter_dirs)} on gpu")
+        adapters = []
+        for adapter_dir in adapter_dirs:
+            if adapter_dir is not None:
+                adapters.append(self.adapters[self.adapter_id[adapter_dir]])
+        self.infer_adapter.load_adapters(adapters)
 
 
     @torch.no_grad()
     def exposed_offload_adapters(self, reserve_dirs=None, prefetch=False):
-        if not self.input_params.bmm:
-            if self.enable_unified_mem_manager:
-                self.infer_adapter_alt.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
-            else:
-                self.infer_adapter.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
-        else:
-            reserve_dirs = reserve_dirs if reserve_dirs is not None else []
-            for adapter_dir, id in self.adapter_id.items():
-                if adapter_dir is not None and adapter_dir not in reserve_dirs:
-                    self.adapters[id].offload_from_gpu()
+        self.infer_adapter.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
         if self.world_size != 1:
             batch_id, reqs, dtype = obtain(batch_id), obtain(reqs), obtain(dtype)
-        import torch
         if dtype == "fp16":
             dtype = torch.float16
         else:
             assert False, "error dtype"
-        if self.enable_unified_mem_manager:
-            batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), 
-                                            self.model.mem_manager, self.model.vocab_size, self.model.alt_mem_manager)
-        else:
-            batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), 
-                                            self.model.mem_manager, self.model.vocab_size, None)
+        batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), 
+                                        self.model.mem_manager, self.model.vocab_size)
         self.cache[batch_id] = batch_data
         return
     
@@ -322,45 +283,20 @@ class ModelRpcServer(rpyc.Service):
             engine = self.model
         else:
             adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in batch.adapter_dirs]
-            if self.input_params.no_lora_compute:
-                engine = LoraUnorderedBatchInfer(self.model, adapters)
-            elif self.input_params.bmm:
-                torch.cuda.empty_cache()
-                compressed_dirs = [batch.adapter_dirs[0]]
-                adapter_sep = [0]
-                cnt = 1
-                for i in range(1, len(batch.adapter_dirs)):
-                    if batch.adapter_dirs[i] == batch.adapter_dirs[i-1]:
-                        cnt += 1
-                    else:
-                        compressed_dirs.append(batch.adapter_dirs[i])
-                        adapter_sep.append(adapter_sep[-1] + cnt)
-                        cnt = 1
-                adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
-                engine = LoraBmmInfer(self.model, adapters, adapter_sep)
-            elif self.input_params.finetuning_params.finetuning_lora_path!="":
-                engine = LoraUnorderedBatchMixed(
-                        self.model,
-                        adapters,
-                        infer_adapter=self.infer_adapter,
-                        infer_adapter_alt=self.infer_adapter_alt,
-                        finetuning_adapter=self.finetuning_adapter,
-                        enable_unified_mem_manager=self.enable_unified_mem_manager,
-                        enable_cuda_graph=getattr(self.input_params, 'enable_cuda_graph', False))
-                kwargs["finetune_mask"] = batch.finetune_mask
-                kwargs["b_loc_key"] = batch.nopad_b_loc_key
-                kwargs["b_loc_value"] = batch.nopad_b_loc_value
-                kwargs["prefill_interrupt_event"] = prefill_interrupt_event
-                if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
-                    kwargs["ref_mask"] = batch.ref_mask
-            else:
-                engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
-
+            engine = LoraUnorderedBatchMixed(
+                    self.model,
+                    adapters,
+                    infer_adapter=self.infer_adapter,
+                    finetuning_adapter=self.finetuning_adapter,
+                    enable_cuda_graph=getattr(self.input_params, 'enable_cuda_graph', False))
+            kwargs["finetune_mask"] = batch.finetune_mask
+            kwargs["b_loc_key"] = batch.nopad_b_loc_key
+            kwargs["b_loc_value"] = batch.nopad_b_loc_value
+            kwargs["prefill_interrupt_event"] = prefill_interrupt_event
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
         if not is_prefill and decode_count == 2:
             kwargs["print_time_profile"] = True
-        start = time.time()
         logits = engine.forward(**kwargs)
         #print(f"Engine execution time: {time.time() - start:.3f}s")
 
@@ -376,9 +312,7 @@ class ModelRpcServer(rpyc.Service):
         output_dict = {}
         new_input_ids = []        
         for i, (r, all_input_ids, next_token_id, next_token_logprob) in enumerate(zip(batch.requests, batch.all_input_ids, next_token_ids, next_token_logprobs)):
-            # all_input_ids_tensor = torch.tensor(all_input_ids, dtype=torch.long, device="cuda")
             all_input_ids.append(int(next_token_id))
-            # all_input_ids_tensor = None
             new_input_ids.append(next_token_id)
             batch.all_input_ids[i] = all_input_ids
             batch.input_lengths[i] += 1
@@ -396,8 +330,39 @@ class ModelRpcServer(rpyc.Service):
         batch.nopad_b_seq_len += 1
         self.cache[batch.batch_id] = batch
         return output_dict
+            
+    def exposed_back_batch(self, current_epoch):
+        self.current_epoch = current_epoch
+        result = self.backward()
+        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
+            self.model.backward_engine.print_reset_log()
+        return result
+    
+    def backward(self):
+        if self.backward_service is not None:
+            requests_info_dict = self.model.mem_manager.export_requests_info()
+            requests_info_dict["current_epoch"] = self.current_epoch
+            self.rpc_send.send(requests_info_dict)
+            finished, loss, total_token_processed = self.rpc_recv.recv()
+        else:
+            finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
+        if finished:
+            self.model.mem_manager.reset_activation_pool()
+            return True, loss, total_token_processed
+        else:
+            return False, None, None
+    
+    def exposed_shutdown_backward(self):
+        if self.backward_service is not None:
+            self.rpc_send.send("EXIT")
+            self.backward_service.join()
 
+    def exposed_pause_backward(self):
+        self.bwd_pause_event.clear()
 
+    def exposed_resume_backward(self):
+        self.bwd_pause_event.set()
+    
     def compare_lora_drift_per_layer(self):
         """
         Compares current LoRA weights to the originally saved weights,
@@ -433,55 +398,6 @@ class ModelRpcServer(rpyc.Service):
                 else:
                     print(f"but w_combined_home_fp32 does not has NaN/Inf")
                 break   
-            
-    def exposed_back_batch(self, current_epoch):
-        self.current_epoch = current_epoch
-        result = self.backward()
-        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
-            self.model.backward_engine.print_reset_log()
-        return result
-    
-    def backward(self):
-        if self.backward_service is not None:
-            requests_info_dict = self.model.alt_mem_manager.export_requests_info()
-            requests_info_dict["current_epoch"] = self.current_epoch
-            self.rpc_send.send(requests_info_dict)
-            finished, loss, total_token_processed = self.rpc_recv.recv()
-        else:
-            finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
-        if finished:
-            if self.enable_unified_mem_manager:
-                self.model.alt_mem_manager.reset_activation_pool()
-            else:
-                self.model.mem_manager.reset_activation_pool()
-            return True, loss, total_token_processed
-        else:
-            return False, None, None
-    
-    def exposed_shutdown_backward(self):
-        if self.backward_service is not None:
-            self.rpc_send.send("EXIT")
-            self.backward_service.join()
-
-    def exposed_pause_backward(self):
-        self.bwd_pause_event.clear()
-
-    def exposed_resume_backward(self):
-        self.bwd_pause_event.set()
-    
-    def exposed_unmerge_adapter(self):
-        print("len adapters:", len(self.infer_adapter.adapter_dirs))
-        assert len(self.infer_adapter.adapter_dirs) == 1
-        print("unmerge:", self.infer_adapter.adapter_dirs)
-        engine = LoraPEFTBatchInfer(self.model, infer_adapter=self.infer_adapter)
-        engine.unmerge_adapter()
-
-    def exposed_merge_adapter(self):
-        print("len adapters:", len(self.infer_adapter.adapter_dirs))
-        assert len(self.infer_adapter.adapter_dirs) == 1
-        print("merge:", self.infer_adapter.adapter_dirs)
-        engine = LoraPEFTBatchInfer(self.model, infer_adapter=self.infer_adapter)
-        engine.merge_adapter()
 
 
 class ModelRpcClient:
@@ -502,8 +418,6 @@ class ModelRpcClient:
             self._init_model = async_wrap(self.model.init_model)
             self._load_adapters = rpyc.async_(self.model.load_adapters)
             self._offload_adapters = rpyc.async_(self.model.offload_adapters)
-            self._unmerge_adapter = rpyc.async_(self.model.unmerge_adapter)
-            self._merge_adapter = rpyc.async_(self.model.merge_adapter)
             self._add_batch = async_wrap(self.model.add_batch)
             self._prefill_batch = async_wrap(self.model.prefill_batch)
 
@@ -520,8 +434,6 @@ class ModelRpcClient:
             self._init_model = self.model.exposed_init_model
             self._load_adapters = self.model.exposed_load_adapters
             self._offload_adapters = self.model.exposed_offload_adapters
-            self._merge_adapter = self.model.exposed_merge_adapter
-            self._unmerge_adapter = self.model.exposed_unmerge_adapter
             self._add_batch = self.model.exposed_add_batch
             self._prefill_batch = self.model.exposed_prefill_batch
 
@@ -539,11 +451,11 @@ class ModelRpcClient:
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                          max_total_token_num, load_way, mode, input_params,
 			                prefetch_stream, half_model=False, mem_manager_log_path=None,
-                            enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
+                            unified_mem_manager_max_size=0,
                             gpu_profiler=None, use_rank_id=0):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
-						                            prefetch_stream, half_model, mem_manager_log_path, enable_unified_mem_manager,
+						                            prefetch_stream, half_model, mem_manager_log_path,
                                                     gpu_profiler, unified_mem_manager_max_size, use_rank_id)
         if self.use_rpc:
             await ans
@@ -557,12 +469,6 @@ class ModelRpcClient:
 
     async def offload_adapters(self, reserved_reqs=None, prefetch=False):
         self._offload_adapters(reserved_reqs, prefetch=prefetch)
-    
-    async def unmerge_adapter(self):
-        self._unmerge_adapter()
-    
-    async def merge_adapter(self):
-        self._merge_adapter()
 
 
     async def init_batch(self, batch_id, reqs):
@@ -572,13 +478,6 @@ class ModelRpcClient:
             return
         else:
             return
-
-    # async def prefill_batch(self, batch_id, prefill_interrupt_event=None):
-    #     ans = self._prefill_batch(batch_id, prefill_interrupt_event)
-    #     if self.use_rpc:
-    #         return await ans
-    #     else:
-    #         return ans
     
     async def prefill_batch(self, batch_id, prefill_interrupt_event=None):
         if self.use_rpc:
@@ -588,13 +487,6 @@ class ModelRpcClient:
             # run blocking call in a thread
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._prefill_batch, batch_id, prefill_interrupt_event)
-
-    # async def back_batch(self):
-    #     ans = self._back_batch()
-    #     if self.use_rpc:
-    #         return await ans
-    #     else:
-    #         return ans
         
     async def back_batch(self, current_epoch):
         loop = asyncio.get_running_loop()
@@ -627,10 +519,7 @@ class ModelRpcClient:
             return self._resume_backward()
     
     def reset_activation_pool(self):
-        if self.model.enable_unified_mem_manager:
-            self.model.model.alt_mem_manager.reset_activation_pool()
-        else:
-            self.model.model.mem_manager.reset_activation_pool()
+        self.model.model.mem_manager.reset_activation_pool()
         return
 
     async def decode_batch(self, batch_id, decode_count=-1):
