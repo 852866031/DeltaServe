@@ -185,12 +185,12 @@ async def main() -> None:
     ap.add_argument("--co", action="store_true")
 
     # request params
-    ap.add_argument("--prompt", default="Instruction:\nSay hello in one short sentence.\n### Response: ")
+    ap.add_argument("--prompt", default="The capital of France is  ")
     ap.add_argument("--max_new_tokens", type=int, default=10)
 
     # These should match what your server expects; override if needed
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
-    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
+    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/DeltaServe/eval/llama3/adapters/llama3-toy-lora")
     #yzdnaufan/Llama-3-8b-Alpaca-Lora
     # wait params
     ap.add_argument("--max_wait_s", type=float, default=240.0)
