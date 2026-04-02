@@ -134,6 +134,29 @@ class ModelRpcServer(rpyc.Service):
                                                     mem_manager_log_path=mem_manager_log_path,
                                                     enable_unified_mem_manager=enable_unified_mem_manager,
                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
+            elif self.model_type == "qwen3_moe":
+                if getattr(input_params, "use_ep", False):
+                    from slora.models.qwen3_moe.model import Qwen3MoeEPTpPartModel
+                    self.model = Qwen3MoeEPTpPartModel(rank_id, world_size, weight_dir,
+                                                       max_total_token_num,
+                                                       mem_adapter_size=input_params.pool_size_lora,
+                                                       load_way=load_way, mode=mode,
+                                                       dummy=input_params.dummy,
+                                                       half_model=half_model,
+                                                       mem_manager_log_path=mem_manager_log_path,
+                                                       enable_unified_mem_manager=enable_unified_mem_manager,
+                                                       unified_mem_manager_max_size=unified_mem_manager_max_size)
+                else:
+                    from slora.models.qwen3_moe.model import Qwen3MoeTpPartModel
+                    self.model = Qwen3MoeTpPartModel(rank_id, world_size, weight_dir,
+                                                     max_total_token_num,
+                                                     mem_adapter_size=input_params.pool_size_lora,
+                                                     load_way=load_way, mode=mode,
+                                                     dummy=input_params.dummy,
+                                                     half_model=half_model,
+                                                     mem_manager_log_path=mem_manager_log_path,
+                                                     enable_unified_mem_manager=enable_unified_mem_manager,
+                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:

@@ -1,0 +1,12 @@
+{
+  "finetuning_type": "SFT",
+  "finetuning_data_path": null,
+  "finetuning_lora_path": null,
+  "num_epochs": 1,
+  "start_on_launch": false,
+  "ttft_slo": 0.5,
+  "avg_tbt_slo": 0.3,
+  "max_tbt_slo": 0.6,
+  "max_finetuning_tokens_in_batch": 128,
+  "max_saved_finetuning_tokens": 128
+}

@@ -1,0 +1,636 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading cais/mmlu (all subjects, test split) ...
+Loading tokenizer from /mnt/nfs/home/ramya/models/meta-llama/Meta-Llama-3-8B-HF ...
+
+Domain summary after tokenization (skipped 0 unmapped):
+  medical     : n= 2225, mean_len=80, median=60, std=67, max=970
+  stem_math   : n= 1190, mean_len=79, median=70, std=37, max=356
+  stem_sci    : n= 1088, mean_len=68, median=61, std=33, max=258
+  stem_cs     : n=  412, mean_len=87, median=74, std=50, max=391
+  law_ethics  : n= 3578, mean_len=154, median=106, std=106, max=729
+  social      : n= 3565, mean_len=73, median=62, std=40, max=403
+  humanities  : n= 1984, mean_len=135, median=53, std=144, max=741
+
+Batches built:
+  Calibration : 200 batches
+  medical     : 50 profiling batches (pool=200)
+  stem_math   : 50 profiling batches (pool=200)
+  stem_sci    : 50 profiling batches (pool=200)
+  stem_cs     : 50 profiling batches (pool=200)
+  law_ethics  : 50 profiling batches (pool=200)
+  social      : 50 profiling batches (pool=200)
+  humanities  : 50 profiling batches (pool=200)
+
+Loading model from /mnt/nfs/home/ramya/models/meta-llama/Meta-Llama-3-8B-HF ...
+Load weight from /mnt/nfs/home/ramya/models/meta-llama/Meta-Llama-3-8B-HF
+Model loaded. vocab_size=128256
+Warming up (20 batches)...
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Warmup done.
+
+[Phase 1] Calibration: 200 batches...
+Old mem_allocator alloc called, need_size 293 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 322 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 396 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 216 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 376 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 267 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 403 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 222 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 206 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 404 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 311 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 388 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 232 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 316 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 306 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 280 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 376 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 238 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 349 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 318 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 266 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 369 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 299 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 335 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 258 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 428 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 272 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 383 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 248 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 234 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 319 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 196 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 309 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 184 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 279 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 232 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 176 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 231 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 230 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 243 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 375 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 397 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 313 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 648 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 420 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 406 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 179 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 388 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 565 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 281 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 446 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 299 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 359 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 331 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 747 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 657 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 245 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 452 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 233 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 616 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 298 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 422 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 507 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 239 can_use_mem_size 35000
+  calib 64/200
+Old mem_allocator alloc called, need_size 424 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 200 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 506 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 344 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 430 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 651 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 300 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 670 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 417 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 419 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 442 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 639 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 434 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 380 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 550 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 308 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 531 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 382 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 588 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 572 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 371 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 601 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 235 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 482 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 282 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 297 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 643 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 193 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 517 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 247 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 496 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 298 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 537 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 679 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 260 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 464 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 327 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 465 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 312 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 384 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 695 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 325 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 447 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 293 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 609 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 236 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 553 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 461 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 329 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 366 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 277 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 512 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 274 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 415 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 625 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 387 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 488 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 276 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 554 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 345 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 499 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 500 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 335 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 391 can_use_mem_size 35000
+  calib 128/200
+Old mem_allocator alloc called, need_size 205 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 351 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 284 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 453 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 370 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 478 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 472 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 521 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 314 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 291 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 545 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 644 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 349 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 575 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 239 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 431 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 315 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 608 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 396 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 405 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 313 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 553 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 375 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 632 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 710 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 294 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 553 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 330 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 539 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 348 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 392 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 804 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 324 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 511 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 328 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 526 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 242 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 811 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 663 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 353 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 610 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 205 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 420 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 343 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 513 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 474 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 239 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 909 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 294 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 601 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 434 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 447 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 591 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 288 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 542 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 279 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 453 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 324 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 482 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 527 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 386 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 626 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 264 can_use_mem_size 35000
+  calib 192/200
+Old mem_allocator alloc called, need_size 479 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 270 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 666 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 608 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 257 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 579 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 347 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 372 can_use_mem_size 35000
+  Fit: fit_rmse=3.468ms  alpha=7.628e-09  beta=5.199e-05
+
+[Phase 2] Per-domain profiling...
+  [medical]: 50 batches
+Old mem_allocator alloc called, need_size 145 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 165 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 204 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 209 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 264 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 193 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 171 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 153 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 224 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 224 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 245 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 202 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 236 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 179 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 265 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 253 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 298 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 174 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 230 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 294 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 216 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 230 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 297 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 322 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 301 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 264 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 176 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 219 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 354 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 200 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 362 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 655 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 623 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 785 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 856 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 684 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 708 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 868 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 654 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 729 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 352 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 226 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 226 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 167 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 193 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 213 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 235 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 282 can_use_mem_size 35000
+  [stem_math]: 50 batches
+Old mem_allocator alloc called, need_size 386 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 435 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 512 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 263 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 560 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 337 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 488 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 315 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 311 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 304 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 219 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 247 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 292 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 331 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 280 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 270 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 225 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 197 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 286 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 296 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 261 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 306 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 326 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 271 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 276 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 240 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 215 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 272 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 195 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 266 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 423 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 369 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 490 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 366 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 383 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 546 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 442 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 438 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 446 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 571 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 456 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 500 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 428 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 739 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 526 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 346 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 566 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 378 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 373 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 540 can_use_mem_size 35000
+  [stem_sci]: 50 batches
+Old mem_allocator alloc called, need_size 179 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 191 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 205 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 152 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 179 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 145 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 204 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 165 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 196 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 203 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 173 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 149 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 154 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 176 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 153 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 191 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 170 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 161 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 279 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 252 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 280 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 356 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 337 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 424 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 345 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 286 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 271 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 227 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 449 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 404 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 381 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 411 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 264 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 254 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 277 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 361 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 409 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 397 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 374 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 338 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 474 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 391 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 382 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 296 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 336 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 383 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 357 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 340 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 312 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 383 can_use_mem_size 35000
+  [stem_cs]: 50 batches
+Old mem_allocator alloc called, need_size 437 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 551 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 438 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 327 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 447 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 637 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 377 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 234 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 479 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 240 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 347 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 394 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 591 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 285 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 465 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 468 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 580 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 530 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 438 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 251 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 305 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 404 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 349 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 282 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 252 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 213 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 300 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 273 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 172 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 341 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 252 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 411 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 253 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 282 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 205 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 322 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 266 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 346 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 240 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 248 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 330 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 293 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 274 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 230 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 285 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 283 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 495 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 598 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 490 can_use_mem_size 35000
+  [law_ethics]: 50 batches
+Old mem_allocator alloc called, need_size 300 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 219 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 298 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 231 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 205 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1092 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 969 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 757 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 920 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 820 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 817 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 673 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 938 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 939 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 780 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1125 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 903 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1197 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 914 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 942 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1047 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1116 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 869 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 683 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1122 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 849 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1056 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1109 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 972 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 974 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1001 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 712 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1410 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1175 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 713 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1109 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1048 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1186 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1078 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 820 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 918 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1599 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 899 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 765 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 798 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 949 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 1135 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 893 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 960 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 782 can_use_mem_size 35000
+  [social]: 50 batches
+Old mem_allocator alloc called, need_size 179 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 336 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 230 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 194 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 220 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 142 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 263 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 236 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 253 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 214 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 243 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 360 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 422 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 440 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 420 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 408 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 352 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 299 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 301 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 240 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 178 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 313 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 244 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 349 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 256 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 226 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 268 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 416 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 257 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 298 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 307 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 236 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 309 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 323 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 580 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 524 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 691 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 830 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 559 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 726 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 642 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 420 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 292 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 243 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 195 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 267 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 243 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 215 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 271 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 247 can_use_mem_size 35000
+  [humanities]: 50 batches
+Old mem_allocator alloc called, need_size 147 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 197 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 134 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 221 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 213 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 146 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 165 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 258 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 125 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 293 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 161 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 124 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 135 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 122 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 220 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 222 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 176 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 156 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 157 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 150 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 137 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 139 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 221 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 222 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 290 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 267 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 184 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 221 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 251 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 212 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 227 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 237 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 287 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 347 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 226 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 231 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 241 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 229 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 218 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 268 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 231 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 182 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 154 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 174 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 155 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 157 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 137 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 148 can_use_mem_size 35000
+Old mem_allocator alloc called, need_size 161 can_use_mem_size 35000
+Saved: /mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/exp5/results/per_batch_domain.csv
+Saved: /mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/exp5/results/domain_summary.csv
+Saved: /mnt/nfs/home/ramya/slora-plus/S-LoRA/test/llama3/exp5/results/gate_decisions.csv
+
+==================================================================================
+MMLU KNOWLEDGE-DOMAIN EXPERIMENT — Llama3-8B (dense, no MoE)
+==================================================================================
+  domain           n   mean_ms     cv%  T_in_mean  T_in_std  mean_err%  p90_err%
+  humanities      50     38.81    7.76        198        52      -2.24      9.31
+  law_ethics      50     78.58   20.87        896       277      -2.90      7.22
+  medical         50     45.28   25.24        324       199      -1.05      8.16
+  social          50     45.19   18.95        334       149      +0.17      7.18
+  stem_cs         50     46.66   13.20        355       117      -0.73      7.83
+  stem_math       50     47.50   13.92        370       120      -0.59     10.06
+  stem_sci        50     42.22   13.37        284        96      +0.75      8.37
+
+  Gate decisions (SFT_BUDGET=256 tokens, all domains pooled):
+   SLO(ms)  FP_count  FP%(all)  FN%(all)  admitted%
+        80         0      0.0%      6.9%      86.3%
+       100         0      0.0%      2.9%      96.3%
+       120         0      0.0%      0.3%      99.7%
+       150         0      0.0%      0.0%     100.0%
+       200         0      0.0%      0.0%     100.0%

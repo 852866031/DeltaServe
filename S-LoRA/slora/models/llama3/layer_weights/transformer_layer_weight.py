@@ -11,6 +11,10 @@ class Llama3TransformerLayerWeight(LlamaTransformerLayerWeight):
         return
     
     def load_hf_weights(self, weights, dummy=False):
+        if dummy:
+            self._load_qkvo_dummy_weights()
+            self._load_ffn_dummy_weights()
+            return
         self._load_qkvo_weights(weights)
         self._load_ffn_weights(weights)
 

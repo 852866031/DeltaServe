@@ -1,51 +1,58 @@
+import time
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from slora.models.mixtral.layer_infer.transformer_layer_infer import MixtralTransformerLayerInfer
-from slora.models.mixtral.layer_weights.transformer_layer_weight_ep import MixtralEPTransformerLayerWeight
+from slora.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MoeTransformerLayerInfer
+from slora.models.qwen3_moe.layer_weights.transformer_layer_weight_ep import Qwen3MoeEPTransformerLayerWeight
 from slora.models.llama.infer_struct import LlamaInferStateInfo
 
-# Routing imbalance logger — populated by _ffn, cleared by experiment harness.
-# Each entry is recv_counts: list of ints (one per rank) showing how many tokens
-# rank 0 received from each rank for that layer. 32 entries per forward pass.
+# Routing imbalance logger — same pattern as Mixtral EP for experiment instrumentation.
 routing_imbalance_log: list = []
 
+# Per-layer timing logs. Each entry corresponds to one MoE layer in order.
+# comm_time_log[i]   = (fwd_comm_ms, bwd_comm_ms) for layer i
+# expert_time_log[i] = expert_compute_ms for layer i
+# Only populated when timing_enabled = True (set by experiment scripts).
+comm_time_log: list = []
+expert_time_log: list = []
+timing_enabled: bool = False
 
-class MixtralEPTransformerLayerInfer(MixtralTransformerLayerInfer):
+
+class Qwen3MoeEPTransformerLayerInfer(Qwen3MoeTransformerLayerInfer):
     """
-    Transformer layer inference for Mixtral-8x7B with Expert Parallelism.
+    Transformer layer inference for Qwen3-30B-A3B with Expert Parallelism.
 
     EP routing: tokens are dispatched to the rank that owns their selected expert
-    via all_to_all_single.  Each rank runs only its local experts at full
-    intermediate size.  The all_reduce that the TP template inserts after _ffn
-    is skipped by overriding _context_ffn and _token_ffn directly.
+    via all_to_all_single. Each rank runs only its local experts at full
+    moe_intermediate_size. The all_reduce inserted by the TP template is skipped
+    by overriding _context_ffn and _token_ffn (same pattern as MixtralEP).
     """
 
     def _ffn(
         self,
         input: torch.Tensor,
         infer_state: LlamaInferStateInfo,
-        layer_weight: MixtralEPTransformerLayerWeight,
+        layer_weight: Qwen3MoeEPTransformerLayerWeight,
     ) -> torch.Tensor:
-        hidden = input.view(-1, self.embed_dim_)   # (T, H)
+        hidden = input.view(-1, self.embed_dim_)
         T, H = hidden.shape
-        K = self.network_config_["num_experts_per_tok"]   # typically 2
-        E = self.network_config_["num_local_experts"]     # typically 8
+        K = self.network_config_["num_experts_per_tok"]
+        E = self.network_config_["num_local_experts"]
         R = self.world_size_
-        epk = E // R                                       # experts per rank
+        epk = E // R
 
-        # --- Router: replicated on all ranks, same result everywhere ---
-        router_logits = hidden @ layer_weight.moe_gate_weight_.T    # (T, E)
+        # Router: replicated on all ranks
+        router_logits = hidden @ layer_weight.moe_gate_weight_.T
         routing_weights = F.softmax(router_logits.float(), dim=-1)
-        topk_w, topk_e = routing_weights.topk(K, dim=-1)           # (T, K)
+        topk_w, topk_e = routing_weights.topk(K, dim=-1)
+        # norm_topk_prob=True
         topk_w = (topk_w / topk_w.sum(-1, keepdim=True)).to(hidden.dtype)
 
         if R == 1:
-            # Single GPU: all experts are local, no communication needed
             final_out = torch.zeros_like(hidden)
             for exp_idx in range(epk):
-                mask = (topk_e == exp_idx)               # (T, K)
+                mask = (topk_e == exp_idx)
                 if not mask.any():
                     continue
                 tok_ids = mask.any(dim=-1).nonzero(as_tuple=True)[0]
@@ -58,52 +65,55 @@ class MixtralEPTransformerLayerInfer(MixtralTransformerLayerInfer):
                     final_out[tok] += topk_w[tok, slots].sum() * out[li]
             return final_out
 
-        # --- Flatten: each (token, slot) is an independent work item ---
-        flat_e = topk_e.view(-1)                        # (T*K,)
-        flat_w = topk_w.view(-1)                        # (T*K,)
-        flat_t = hidden.repeat_interleave(K, dim=0)     # (T*K, H)
+        # Flatten: each (token, slot) is an independent work item
+        flat_e = topk_e.view(-1)
+        flat_w = topk_w.view(-1)
+        flat_t = hidden.repeat_interleave(K, dim=0)
 
-        dest_rank = flat_e // epk                       # which rank owns this expert
-        local_exp = flat_e % epk                        # index within that rank
+        dest_rank = flat_e // epk
+        local_exp = flat_e % epk
 
-        # Sort by destination rank for contiguous all_to_all buffers
         perm = dest_rank.argsort(stable=True)
         inv_perm = perm.argsort()
         s_dest = dest_rank[perm]
         s_local_exp = local_exp[perm]
         s_tokens = flat_t[perm]
 
-        # Compute send counts per rank
         send_counts_t = torch.zeros(R, dtype=torch.int64, device=hidden.device)
         for r in range(R):
             send_counts_t[r] = (s_dest == r).sum()
         send_counts = send_counts_t.tolist()
 
-        # Exchange counts so every rank knows how many tokens it will receive
         recv_counts_t = torch.empty(R, dtype=torch.int64, device=hidden.device)
         dist.all_to_all_single(recv_counts_t, send_counts_t)
         recv_counts = recv_counts_t.tolist()
-        if routing_imbalance_log is not None and dist.get_rank() == 0:
+        if routing_imbalance_log is not None:
             routing_imbalance_log.append(recv_counts)
         recv_total = sum(recv_counts)
 
-        # Exchange token embeddings
         recv_tokens = torch.empty(recv_total, H, dtype=hidden.dtype, device=hidden.device)
+
+        # --- forward all_to_all: send token embeddings + expert indices to owners ---
+        if timing_enabled:
+            torch.cuda.synchronize(); _t_fwd0 = time.perf_counter()
         dist.all_to_all_single(
             recv_tokens, s_tokens,
             output_split_sizes=recv_counts,
             input_split_sizes=send_counts,
         )
 
-        # Exchange local expert indices
         recv_local_exp = torch.empty(recv_total, dtype=torch.long, device=hidden.device)
         dist.all_to_all_single(
             recv_local_exp, s_local_exp,
             output_split_sizes=recv_counts,
             input_split_sizes=send_counts,
         )
+        if timing_enabled:
+            torch.cuda.synchronize(); _t_fwd1 = time.perf_counter()
 
-        # --- Local FFN: process received tokens with this rank's experts ---
+        # --- expert computation ---
+        if timing_enabled:
+            _t_exp0 = time.perf_counter()
         expert_out = torch.zeros(recv_total, H, dtype=hidden.dtype, device=hidden.device)
         for exp_idx in range(epk):
             mask = (recv_local_exp == exp_idx)
@@ -113,22 +123,26 @@ class MixtralEPTransformerLayerInfer(MixtralTransformerLayerInfer):
             gate = F.silu(tok @ layer_weight.experts_w1_[exp_idx])
             up = tok @ layer_weight.experts_w3_[exp_idx]
             expert_out[mask] = (gate * up) @ layer_weight.experts_w2_[exp_idx]
+        if timing_enabled:
+            torch.cuda.synchronize(); _t_exp1 = time.perf_counter()
 
-        # --- Return results to originating ranks ---
-        send_out = torch.empty_like(s_tokens)   # (sum(send_counts), H)
+        # --- backward all_to_all: return results to originating ranks ---
+        send_out = torch.empty_like(s_tokens)
+        if timing_enabled:
+            _t_bwd0 = time.perf_counter()
         dist.all_to_all_single(
             send_out, expert_out,
             output_split_sizes=send_counts,
             input_split_sizes=recv_counts,
         )
+        if timing_enabled:
+            torch.cuda.synchronize(); _t_bwd1 = time.perf_counter()
+            comm_time_log.append(((_t_fwd1 - _t_fwd0) * 1000, (_t_bwd1 - _t_bwd0) * 1000))
+            expert_time_log.append((_t_exp1 - _t_exp0) * 1000)
 
-        # Unsort → restore original (token, slot) order, then weighted sum
-        out = send_out[inv_perm]                                        # (T*K, H)
-        final_out = (out * flat_w.unsqueeze(-1)).view(T, K, H).sum(dim=1)  # (T, H)
+        out = send_out[inv_perm]
+        final_out = (out * flat_w.unsqueeze(-1)).view(T, K, H).sum(dim=1)
         return final_out
-
-    # Override _context_ffn and _token_ffn to skip the template's all_reduce.
-    # EP is already globally reduced via all_to_all — no further reduction needed.
 
     def _context_ffn(self, input_embdings, infer_state, layer_weight):
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)

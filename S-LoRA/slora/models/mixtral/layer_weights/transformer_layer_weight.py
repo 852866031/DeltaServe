@@ -55,9 +55,9 @@ class MixtralTransformerLayerWeight(Llama3TransformerLayerWeight):
         end = split_inter * (self.tp_rank_ + 1)
 
         num_experts = self.network_config_["num_local_experts"]
-        self.experts_w1_ = []
-        self.experts_w3_ = []
-        self.experts_w2_ = []
+        # Do NOT reset experts_w1_/w2_/w3_ here — they are initialized in __init__
+        # and this method is called once per shard file; resetting would clear weights
+        # loaded by a previous shard.
 
         for j in range(num_experts):
             prefix = f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{j}"

@@ -31,9 +31,8 @@ class MixtralEPTransformerLayerWeight(MixtralTransformerLayerWeight):
         start_exp = epk * self.tp_rank_
         end_exp = start_exp + epk
 
-        self.experts_w1_ = []
-        self.experts_w3_ = []
-        self.experts_w2_ = []
+        # Do NOT reset experts_w1_/w2_/w3_ here — initialized in __init__ and
+        # this method is called once per shard; resetting clears weights from earlier shards.
 
         for j in range(start_exp, end_exp):
             prefix = f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{j}"
