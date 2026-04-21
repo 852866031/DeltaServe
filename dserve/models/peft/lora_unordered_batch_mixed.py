@@ -171,21 +171,48 @@ class LoraUnorderedBatchMixed:
         infer_state.mem_manager = self.base_model.mem_manager
         infer_state.b_loc_key = b_loc_key
         infer_state.b_loc_value = b_loc_value
-        infer_state.prefill_mem_index_key = self.base_model.mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE)
-        infer_state.prefill_mem_index_value = self.base_model.mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE)
-        infer_state.prefill_mem_index_cat = torch.cat([infer_state.prefill_mem_index_key, infer_state.prefill_mem_index_value], dim=0)
-        init_bloc(infer_state.b_loc_key, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index_key)
-        init_bloc(infer_state.b_loc_value, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index_value)
 
+        # Decide whether to use CUDA graph prefill. If so, allocate T_bucket KV slots
+        # (so padding tokens write to DEDICATED extra slots, never overwriting real slots).
+        use_prefill_cg = (
+            self.enable_cuda_graph
+            and batch_size == 1
+            and (finetune_mask is None or not bool(torch.any(finetune_mask)))
+            and ref_mask is None
+            and prefill_interrupt_event is None
+        )
+        if use_prefill_cg:
+            from dserve.common.cuda_graph_runner import CudaGraphRunner
+            T_bucket = CudaGraphRunner.get_prefill_token_bucket(total_token_num)
+            alloc_size = T_bucket
+        else:
+            alloc_size = total_token_num
+
+        infer_state.prefill_mem_index_key = self.base_model.mem_manager.alloc(alloc_size, PageType.KV_CACHE)
+        infer_state.prefill_mem_index_value = self.base_model.mem_manager.alloc(alloc_size, PageType.KV_CACHE)
+        infer_state.prefill_mem_index_cat = torch.cat([infer_state.prefill_mem_index_key, infer_state.prefill_mem_index_value], dim=0)
+        # init_bloc uses the first total_token_num indices for the real tokens.
+        # Padding indices [total_token_num: T_bucket] are dedicated scratch slots.
+        init_bloc(infer_state.b_loc_key, b_seq_len, max_len_in_batch,
+                  infer_state.prefill_mem_index_key[:total_token_num])
+        init_bloc(infer_state.b_loc_value, b_seq_len, max_len_in_batch,
+                  infer_state.prefill_mem_index_value[:total_token_num])
 
         infer_state.prefill_key_buffer = torch.empty(
-                (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
+                (alloc_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
         infer_state.prefill_value_buffer = torch.empty(
-                (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
+                (alloc_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
+
+        if use_prefill_cg:
+            predict_logics = self._prefill_with_cuda_graph(
+                batch_size, total_token_num, input_ids, infer_state,
+                self.batch_req_bins, no_lora_compute)
+            return predict_logics
+
         predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, prefill_interrupt_event=prefill_interrupt_event)
-        return predict_logics       
+        return predict_logics
 
     def interrupt_and_clean(
         self,
@@ -225,33 +252,140 @@ class LoraUnorderedBatchMixed:
             print("⚠️ NaN or Inf remain in logits after cleanup!")
         return logits_fp32
 
+    def _post_infer_inference_only(self, input_embdings, infer_state):
+        """Graph-friendly prefill output: return last-token logits for each request.
+        Pure GPU ops — no .item(), no Python batch loop.
+        """
+        layer_weight = self.base_model.pre_post_weight
+        last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
+        last_input = input_embdings[last_index, :]
+        last_input = self.base_model.post_infer._norm(last_input, infer_state, layer_weight)
+        last_token_logits = torch.mm(last_input, layer_weight.lm_head_weight_.T)
+        return last_token_logits
+
+    def _prefill_with_cuda_graph(self, batch_size, total_token_num, input_ids,
+                                  infer_state, real_batch_req_bins, no_lora_compute=False):
+        """Capture or replay a prefill CUDA graph (MVP: batch_size=1, inference-only).
+
+        Must be called AFTER `_prefill` has populated infer_state (memory indices,
+        position_cos/sin, b_loc_key/value, prefill_key/value_buffer).
+        """
+        if LoraUnorderedBatchMixed._shared_cuda_graph_runner is None:
+            LoraUnorderedBatchMixed._shared_cuda_graph_runner = CudaGraphRunner(
+                max_total_tokens=self.base_model.max_total_token_num if hasattr(self.base_model, 'max_total_token_num') else 25000,
+                num_layers=self.base_model.layers_num,
+                tp_q_head_num=self.base_model.tp_q_head_num_,
+                tp_k_head_num=self.base_model.tp_k_head_num_,
+                head_dim=self.base_model.head_dim_,
+            )
+        runner = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+
+        # Skip all finetune_mask checks inside _context_forward.
+        infer_state._skip_finetune_checks = True
+        # Ensure ref_mask attribute exists and is None so no ref-alignment branch fires.
+        if not hasattr(infer_state, 'ref_mask'):
+            infer_state.ref_mask = None
+
+        forward_kwargs = {
+            'no_lora_compute': no_lora_compute,
+            'prefill_interrupt_event': None,
+        }
+
+        # DEBUG: set DSERVE_PREFILL_CG_DEBUG=pad_only to run the padded forward without
+        # graph capture/replay — isolates whether issues are in padding or graph machinery.
+        import os
+        debug = os.environ.get("DSERVE_PREFILL_CG_DEBUG", "")
+        if debug == "pad_only":
+            return self._prefill_padded_no_graph(
+                batch_size, total_token_num, input_ids, infer_state, real_batch_req_bins, forward_kwargs)
+
+        if runner.has_prefill_graph(batch_size, total_token_num):
+            return runner.prefill_replay(
+                self, batch_size, total_token_num, input_ids, infer_state, real_batch_req_bins)
+        else:
+            return runner.prefill_capture(
+                self, batch_size, total_token_num, self._context_forward,
+                input_ids, infer_state, real_batch_req_bins, forward_kwargs)
+
+    def _prefill_padded_no_graph(self, batch_size, total_token_num, input_ids,
+                                  infer_state, real_batch_req_bins, forward_kwargs):
+        """Run a padded prefill forward WITHOUT CUDA graph capture.
+        Mirrors the padding logic in CudaGraphRunner.prefill_capture but runs eagerly.
+        """
+        runner = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+        T_bucket = runner.get_prefill_token_bucket(total_token_num)
+
+        # Swap delta to T_bucket size
+        self.delta = [
+            torch.zeros((T_bucket, self.max_lora_dim), dtype=torch.float16, device="cuda")
+            for _ in range(3)
+        ]
+
+        # Pad input_ids
+        new_input = torch.zeros(T_bucket, dtype=input_ids.dtype, device="cuda")
+        new_input[:total_token_num].copy_(input_ids)
+
+        # Pad position_cos / sin
+        pc = infer_state.position_cos
+        ps = infer_state.position_sin
+        new_pc = torch.zeros((T_bucket, pc.shape[1]), dtype=pc.dtype, device="cuda")
+        new_ps = torch.zeros((T_bucket, ps.shape[1]), dtype=ps.dtype, device="cuda")
+        new_pc[:total_token_num].copy_(pc)
+        new_ps[:total_token_num].copy_(ps)
+        infer_state.position_cos = new_pc
+        infer_state.position_sin = new_ps
+
+        # Pad batch_req_bins
+        new_brb = torch.zeros(T_bucket, dtype=real_batch_req_bins.dtype, device="cuda")
+        new_brb[:total_token_num].copy_(real_batch_req_bins)
+        self.batch_req_bins = new_brb
+
+        # prefill_mem_index_{key,value} + prefill_key/value_buffer are already T_bucket
+        # sized (allocated in _prefill when use_prefill_cg=True). No re-padding needed.
+        assert infer_state.prefill_mem_index_key.shape[0] == T_bucket
+        assert infer_state.prefill_key_buffer.shape[0] == T_bucket
+        infer_state.prefill_mem_index_cat = torch.cat(
+            [infer_state.prefill_mem_index_key, infer_state.prefill_mem_index_value], dim=0)
+
+        # Force all-zero finetune_mask sized to T_bucket
+        infer_state.finetune_mask = torch.zeros(T_bucket, dtype=torch.bool, device="cuda")
+
+        # Update total_token_num so pre_infer slicing keeps the full padded range
+        infer_state.total_token_num = T_bucket
+
+        return self._context_forward(new_input, infer_state, **forward_kwargs)
+
     @final
     def _context_forward(self, input_ids, infer_state, no_lora_compute=False, prefill_interrupt_event=None):
         cuda_input_ids = input_ids
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-        if self.interrupt_and_clean(prefill_interrupt_event, infer_state): 
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state):
             return None
-        if torch.any(infer_state.finetune_mask):
+        skip_ft = getattr(infer_state, '_skip_finetune_checks', False)
+        if not skip_ft and torch.any(infer_state.finetune_mask):
             infer_state.mem_manager.save_embedding_output(input_embs, infer_state)
         FFN_input_vpids = None
         attention_input_vpids = None
         for i in range(self.base_model.layers_num):
             input_embs = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids):
                 return None
-            if torch.any(infer_state.finetune_mask):
-                FFN_input_vpids = infer_state.mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
+            if not skip_ft and torch.any(infer_state.finetune_mask):
+                FFN_input_vpids = infer_state.mem_manager.save_activations_by_layer(i, input_embs, infer_state,
                                                                             PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
-            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])            
-            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids):
                 return None
-            if torch.any(infer_state.finetune_mask):
-                attention_input_vpids = infer_state.mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
+            if not skip_ft and torch.any(infer_state.finetune_mask):
+                attention_input_vpids = infer_state.mem_manager.save_activations_by_layer(i, input_embs, infer_state,
                                                                             PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
-        if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids):
             return None
-        if infer_state.ref_mask is not None:
+        if skip_ft:
+            # Graph-friendly inference-only last-token logits (no .item(), no Python loop)
+            predict_logics = self._post_infer_inference_only(input_embs, infer_state)
+        elif infer_state.ref_mask is not None:
             predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
                     input_embs, infer_state, self.base_model.pre_post_weight)
             infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
