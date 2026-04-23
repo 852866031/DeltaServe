@@ -41,8 +41,9 @@ def kernel_bgmv(y: torch.Tensor , x: torch.Tensor, w: torch.Tensor, start_indici
     dispatch_bgmv(y, x, w, start_indicies, lora_ranks, loc_indicies, indicies, qkvo, lora_scales, w_ld, w_valid)
 
 class LoraUnorderedBatchMixed:
-    # Class-level shared CudaGraphRunner (persists across engine instances)
+    # Class-level shared runners (persist across engine instances)
     _shared_cuda_graph_runner = None
+    _shared_piecewise_runner = None
 
     def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None, enable_cuda_graph=False):
         self.base_model = base_model
@@ -172,18 +173,30 @@ class LoraUnorderedBatchMixed:
         infer_state.b_loc_key = b_loc_key
         infer_state.b_loc_value = b_loc_value
 
-        # Decide whether to use CUDA graph prefill. If so, allocate T_bucket KV slots
-        # (so padding tokens write to DEDICATED extra slots, never overwriting real slots).
-        use_prefill_cg = (
+        # Decide CUDA graph path. Piecewise (sglang-style) runs attention eagerly and
+        # handles variable length + batch; full-graph requires batch_size=1.
+        import os
+        use_piecewise = (
             self.enable_cuda_graph
+            and os.environ.get('DSERVE_PIECEWISE_PREFILL', '0') == '1'
+            and (finetune_mask is None or not bool(torch.any(finetune_mask)))
+            and ref_mask is None
+            and prefill_interrupt_event is None
+        )
+        use_prefill_cg = (
+            not use_piecewise
+            and self.enable_cuda_graph
             and batch_size == 1
             and (finetune_mask is None or not bool(torch.any(finetune_mask)))
             and ref_mask is None
             and prefill_interrupt_event is None
         )
-        if use_prefill_cg:
-            from dserve.common.cuda_graph_runner import CudaGraphRunner
-            T_bucket = CudaGraphRunner.get_prefill_token_bucket(total_token_num)
+        if use_prefill_cg or use_piecewise:
+            from dserve.common.cuda_graph_runner import CudaGraphRunner, PiecewiseCudaGraphRunner
+            if use_piecewise:
+                T_bucket = PiecewiseCudaGraphRunner.get_token_bucket(total_token_num)
+            else:
+                T_bucket = CudaGraphRunner.get_prefill_token_bucket(total_token_num)
             alloc_size = T_bucket
         else:
             alloc_size = total_token_num
@@ -204,6 +217,11 @@ class LoraUnorderedBatchMixed:
         infer_state.prefill_value_buffer = torch.empty(
                 (alloc_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
+
+        if use_piecewise:
+            return self._prefill_with_piecewise_cuda_graph(
+                batch_size, total_token_num, input_ids, infer_state,
+                self.batch_req_bins, no_lora_compute)
 
         if use_prefill_cg:
             predict_logics = self._prefill_with_cuda_graph(
@@ -262,6 +280,77 @@ class LoraUnorderedBatchMixed:
         last_input = self.base_model.post_infer._norm(last_input, infer_state, layer_weight)
         last_token_logits = torch.mm(last_input, layer_weight.lm_head_weight_.T)
         return last_token_logits
+
+    def _prefill_with_piecewise_cuda_graph(self, batch_size, total_token_num, input_ids,
+                                             infer_state, real_batch_req_bins, no_lora_compute=False):
+        """Capture or replay a PIECEWISE prefill CUDA graph (attention runs eagerly).
+
+        Supports variable total_token_num within a bucket and batch_size > 1.
+        """
+        from dserve.common.cuda_graph_runner import PiecewiseCudaGraphRunner
+        if LoraUnorderedBatchMixed._shared_piecewise_runner is None:
+            LoraUnorderedBatchMixed._shared_piecewise_runner = PiecewiseCudaGraphRunner(
+                max_total_tokens=self.base_model.max_total_token_num if hasattr(self.base_model, 'max_total_token_num') else 25000,
+                num_layers=self.base_model.layers_num,
+                tp_q_head_num=self.base_model.tp_q_head_num_,
+                tp_k_head_num=self.base_model.tp_k_head_num_,
+                head_dim=self.base_model.head_dim_,
+                embed_dim=self.base_model.tp_q_head_num_ * self.base_model.head_dim_,
+            )
+        runner = LoraUnorderedBatchMixed._shared_piecewise_runner
+
+        infer_state._skip_finetune_checks = True
+        if not hasattr(infer_state, 'ref_mask'):
+            infer_state.ref_mask = None
+
+        # Build callables that match runner's interface
+        base_model = self.base_model
+
+        def pre_infer_fn(input_ids_tensor, inf_state):
+            return base_model.pre_infer.context_forward(
+                input_ids_tensor, inf_state, base_model.pre_post_weight)
+
+        def pre_attn_fn(layer_id, input_embs, inf_state, no_lc):
+            return self._pre_attn_piece(layer_id, input_embs, inf_state, no_lc)
+
+        def attention_fn(q, cache_k, cache_v, o_static, inf_state):
+            # Eager context_attention_fwd writing into o_static
+            from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+            layer_infer = base_model.layers_infer[0]  # kv_heads etc. are same per layer
+            tp_q_head_num = layer_infer.tp_q_head_num_
+            head_dim = layer_infer.head_dim_
+            q_view = q.view(-1, tp_q_head_num, head_dim)
+            k_view = cache_k.view(-1, layer_infer.tp_k_head_num_, head_dim)
+            v_view = cache_v.view(-1, layer_infer.tp_v_head_num_, head_dim)
+            o_view = o_static.view(-1, tp_q_head_num, head_dim)
+            context_attention_fwd(q_view, k_view, v_view, o_view,
+                                  inf_state.b_start_loc, inf_state.b_seq_len,
+                                  inf_state.max_len_in_batch)
+
+        def post_attn_fn(layer_id, o, input_embs, inf_state, no_lc):
+            self._post_attn_piece(layer_id, o, input_embs, inf_state, no_lc)
+
+        def post_infer_fn(input_embs, inf_state):
+            return self._post_infer_inference_only(input_embs, inf_state)
+
+        # Set real max_len_in_batch for eager attention (used inside both capture
+        # warmup and replay's attention_fn calls).
+        infer_state.max_len_in_batch = int(infer_state.b_seq_len.max().item())
+
+        if not runner.has_graph(batch_size, total_token_num):
+            # capture() internally populates logits_static and returns it.
+            # Do NOT call replay() right after capture — infer_state has been
+            # rewired to point at the static buffers, so replay's self-copies
+            # would fail.
+            logits = runner.capture(self, batch_size, total_token_num,
+                                  input_ids, infer_state, real_batch_req_bins,
+                                  pre_infer_fn, pre_attn_fn, attention_fn, post_attn_fn,
+                                  post_infer_fn, no_lora_compute)
+        else:
+            logits = runner.replay(self, batch_size, total_token_num,
+                                   input_ids, infer_state, real_batch_req_bins, attention_fn)
+        # logits is bs_bucket-sized; the caller expects exactly batch_size rows.
+        return logits[:batch_size]
 
     def _prefill_with_cuda_graph(self, batch_size, total_token_num, input_ids,
                                   infer_state, real_batch_req_bins, no_lora_compute=False):
@@ -425,6 +514,35 @@ class LoraUnorderedBatchMixed:
         o = self._lora_get_o(layer_id, o, infer_state, no_lora_compute)
         input_embs.add_(o.view(-1, layer_infer.embed_dim_))
         return
+
+    # ─── Piecewise helpers: split _lora_context_attention at the attention boundary ─
+    # These are the static-shape halves that get captured as sub-graphs. Attention
+    # itself runs eagerly in between.
+    def _pre_attn_piece(self, layer_id, input_embs, infer_state, no_lora_compute=False):
+        """Static piece: RMSNorm → QKV + LoRA → rotary → destindex_copy_kv.
+        Returns (q, cache_k, cache_v) where:
+          - q is a graph-local tensor (stable address after capture)
+          - cache_k, cache_v alias infer_state.prefill_key/value_buffer (pre-allocated)
+        Eager attention will read these three.
+        """
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        layer_infer = self.base_model.layers_infer[layer_id]
+        input1 = layer_infer._att_norm(input_embs, infer_state, layer_weight)
+        cache_k, cache_v = layer_infer._pre_cache_kv(infer_state, layer_weight)
+        q = self._lora_get_qkv(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
+        layer_infer._post_cache_kv(cache_k, cache_v, infer_state, layer_weight)
+        return q, cache_k, cache_v
+
+    def _post_attn_piece(self, layer_id, o, input_embs, infer_state, no_lora_compute=False):
+        """Static piece: O projection + LoRA → residual → FFN (norm + gate/up/down) → residual.
+        Modifies input_embs in place. `o` is the output of eager attention.
+        """
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        layer_infer = self.base_model.layers_infer[layer_id]
+        o_out = self._lora_get_o(layer_id, o, infer_state, no_lora_compute)
+        input_embs.add_(o_out.view(-1, layer_infer.embed_dim_))
+        layer_infer._context_ffn(input_embs, infer_state, layer_weight)
+        return input_embs
 
     def _lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False)->torch.Tensor:
         base_model = self.base_model
