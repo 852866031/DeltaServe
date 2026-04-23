@@ -88,7 +88,6 @@ class LoraUnorderedBatchMixed:
             is_prefill=True,
             use_bmm=True,
             no_lora_compute=False,
-            ref_mask = None,
             no_lora_copy=False,
             prefill_interrupt_event=None,
             print_time_profile = False):
@@ -107,8 +106,8 @@ class LoraUnorderedBatchMixed:
 
             out = self._prefill(batch_size, total_token_num, max_len_in_batch,
                                     input_ids,
-                                    b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, 
-                                    finetune_mask, ref_mask, no_lora_compute, prefill_interrupt_event)
+                                    b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len,
+                                    finetune_mask, no_lora_compute, prefill_interrupt_event)
             return out
         else:
             for _ in range(3):
@@ -123,7 +122,7 @@ class LoraUnorderedBatchMixed:
     # Prefill functions for inference and finetuning
     def _prefill(self, batch_size, total_token_num, max_len_in_batch,
                  input_ids,
-                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, finetune_mask, ref_mask,
+                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, finetune_mask,
                    no_lora_compute=False, prefill_interrupt_event=None):
 
         infer_state = self.base_model.infer_state_class()
@@ -138,8 +137,6 @@ class LoraUnorderedBatchMixed:
         infer_state.finetune_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
         nr_finetuning_reqs = 0
         finetuning_start = input_ids.shape[0]
-        if ref_mask!=None:
-            infer_state.ref_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
         if finetune_mask is not None:
             for i in range(batch_size):
                 if finetune_mask[i] == 1:
@@ -149,13 +146,6 @@ class LoraUnorderedBatchMixed:
                     if finetuning_start == input_ids.shape[0]:
                         finetuning_start = start
                     infer_state.finetune_mask[start : start + length] = True
-            if ref_mask!=None:
-                for i in range(batch_size):
-                    if ref_mask[i] == 1:
-                        nr_finetuning_reqs += 1
-                        start = b_start_loc[i].item()
-                        length = b_seq_len[i].item()
-                        infer_state.ref_mask[start : start + length] = True
 
         b_seq_len_numpy = b_seq_len.cpu().numpy()
         position_ids = torch.from_numpy(np.concatenate([
@@ -251,18 +241,12 @@ class LoraUnorderedBatchMixed:
                                                                             PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
         if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
             return None
-        if infer_state.ref_mask is not None:
-            predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
-                    input_embs, infer_state, self.base_model.pre_post_weight)
-            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-            infer_state.mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
-        else:
-            finetune_logits_per_request = []
-            predict_logics = self.base_model.post_infer.token_forward_with_finetune_outputs(
-                    input_embs, finetune_logits_per_request, infer_state, self.base_model.pre_post_weight)
-            #predict_logics = self.sanitize_logits(predict_logics)
-            if torch.any(infer_state.finetune_mask):
-                infer_state.mem_manager.write_to_logit_tensor(finetune_logits_per_request, FFN_input_vpids, attention_input_vpids)
+        finetune_logits_per_request = []
+        predict_logics = self.base_model.post_infer.token_forward_with_finetune_outputs(
+                input_embs, finetune_logits_per_request, infer_state, self.base_model.pre_post_weight)
+        #predict_logics = self.sanitize_logits(predict_logics)
+        if torch.any(infer_state.finetune_mask):
+            infer_state.mem_manager.write_to_logit_tensor(finetune_logits_per_request, FFN_input_vpids, attention_input_vpids)
         #print(f"Embedding time: {input_embs_layer_end_time - start:.3f}s")
         #print(f"Transformer layer time: {transformer_layer_end_time - input_embs_layer_end_time:.3f}s")
         #print(f"Output layer time: {output_layer_end_time - transformer_layer_end_time:.3f}s")

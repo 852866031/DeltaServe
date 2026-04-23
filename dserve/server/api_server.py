@@ -605,6 +605,8 @@ def main():
     ''' cuda graph arguments '''
     parser.add_argument("--enable-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for decode steps to reduce kernel launch overhead")
+    parser.add_argument("--enable-bwd-cuda-graph", action="store_true",
+                        help="Enable CUDA graph capture for the SFT backward FFN path (experimental)")
     
     args = parser.parse_args()
     args.finetuning_config = {}

@@ -70,7 +70,6 @@ class InferBatch:
     adapter_dirs: List[str]
 
     finetune_mask: torch.Tensor  # Added
-    ref_mask: torch.Tensor
 
     @classmethod
     @torch.no_grad()
@@ -82,7 +81,6 @@ class InferBatch:
         out_token_id_counts = []
         sampling_param_list = []
         finetune_flags = []
-        ref_flags = []
 
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
@@ -99,21 +97,13 @@ class InferBatch:
 
             tokenized_input = r['input_id']
             is_finetuning = r.get("is_finetuning", False)
-            is_reference = r.get("is_reference", False)
 
             if is_finetuning:
                 full_input_tensor = torch.tensor(tokenized_input, dtype=torch.int64, device=device)
                 mem_manager.finetune_input_ids.append(full_input_tensor)
 
-            if (is_finetuning or is_reference) and len(tokenized_input) > 1:
+            if is_finetuning and len(tokenized_input) > 1:
                 tokenized_input = tokenized_input[:-1]
-            
-            if is_reference and r.get("completion_mask") is not None:
-                mask_tensor = torch.tensor(r.get("completion_mask"),           
-                           dtype=torch.bool,          
-                           device="cuda")   
-                mem_manager.alignment_completion_masks.append(mask_tensor)
-                mem_manager.alignment_labels.append(r.get("label"))
 
             input_length = len(tokenized_input)
             input_lengths.append(input_length)
@@ -129,11 +119,9 @@ class InferBatch:
 
             adapter_dirs.append(r["adapter_dir"])
             finetune_flags.append(1 if is_finetuning else 0)
-            ref_flags.append(1 if r.get("is_reference", False) else 0)
 
         # Create masks and tensor metadata
         finetune_mask = torch.tensor(finetune_flags, dtype=torch.uint8, device=device)
-        ref_mask = torch.tensor(ref_flags, dtype=torch.uint8, device=device)
         nopad_b_seq_len = torch.tensor(input_lengths, dtype=torch.int32, device=device)
 
         if len(requests) > 1:
@@ -166,7 +154,6 @@ class InferBatch:
             mem_manager=mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=finetune_mask,
-            ref_mask = ref_mask
         )
     
     def count_tokens(self):
@@ -267,7 +254,6 @@ class InferBatch:
             mem_manager=self.mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
-            ref_mask= None
         )
 
 
@@ -348,7 +334,6 @@ class InferBatch:
             mem_manager=self.mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
-            ref_mask=None,
         )
 
     @classmethod
@@ -432,7 +417,6 @@ class InferBatch:
             mem_manager=batches[0].mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
-            ref_mask = None
         )
 
     def __len__(self):

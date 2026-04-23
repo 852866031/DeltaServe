@@ -1,0 +1,89 @@
+# serving_config.yaml
+server:
+  host: 127.0.0.1
+  port: 8000
+  rank_id: 0
+  nccl_port: 28765
+  tp: 1
+
+model:
+  dir: meta-llama/Meta-Llama-3-8B
+  tokenizer_mode: auto
+  trust_remote_code: false
+  half_model: false
+  eos_id: 2
+  mode: []
+
+serving:
+  max_total_token_num: 25000
+  max_req_input_len: 512
+  max_req_total_len: 1024
+  batch_max_tokens: null          # null = auto = 1/5 * max_total
+  running_max_req_size: 1000
+
+lora:
+  adapter_dirs: [adapters/llama3-toy-lora]
+  pool_size_lora: 0
+  swap: true
+  prefetch: false
+  prefetch_size: 0
+  batch_num_adapters: null
+  fair_weights: []
+
+scheduler:
+  name: slora_plus
+  enable_abort: false
+
+memory:
+  enable_unified_mem_manager: true
+  unified_mem_manager_max_size_gb: 6
+  # Was: unified_mem_allocator.py:77 hardcoded 1024
+  max_finetuning_tokens: 1024     # use this as default
+  # Was: mem_allocator.py tot_size*10 mystery multiplier
+  activation_pool_multiplier: 10 #remove this, we will not use this later
+
+graph:  #rename to cuda graph
+  enable_cuda_graph: false         # rename to enable_decode_cuda_graph
+  enable_bwd_cuda_graph: false     # backward FFN graph
+  use_graphed_attention: true      # rename to use_graphed_bwd_attention
+  attn_bn_max: 8
+  attn_l_max: 64
+  # Was: SFT_service_graph.py:51 PROFILE_EVERY
+  profile_every: 10                 # remove this, leave it hardcoded
+
+finetune:
+  enabled: false                   # when false, no_finetuning path
+  type: SFT                        # SFT | Alignment | Alignment Live | SFT Profile
+  data_path: config/emotion.txt
+  lora_path: adapters/llama3-toy-lora-ft
+  reference_lora_path: null        # auto-derived for Alignment
+  num_epochs: 12
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  gamma: 0.9
+  max_saved_finetuning_tokens: 256
+  max_finetuning_tokens_in_batch: 128
+  optimizer_threading: true
+  start_on_launch: true
+  min_backward_sample_count: 8    #remove this parameter
+  prepare_size: 999999
+  log_path: bwd_log.csv
+
+slo:
+  ttft_slo: 0.35
+  avg_tbt_slo: 0.15
+  max_tbt_slo: 0.35
+
+debug:
+  dummy: false
+  no_lora: false
+  no_lora_compute: false
+  no_lora_swap: false
+  no_kernel: false
+  no_mem_pool: false
+  no_mem_manager_log_path: null
+  bmm: false
+  profile: false
+  enable_gpu_profile: false
+  disable_log_stats: false
+  log_stats_interval: 10  #remove this parameter, make it hardcoded

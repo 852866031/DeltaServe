@@ -35,8 +35,8 @@ CONFIG = {
             "tloen/alpaca-lora-7b",
             "MBZUAI/bactrian-x-llama-7b-lora"
         ],
-        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/finetuning_config.json",
-        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/no_finetuning_config.json",
+        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/DeltaServe/eval/llama/config/finetuning_config.json",
+        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/DeltaServe/eval/llama/config/no_finetuning_config.json",
     },
 
     "defaults": {
@@ -131,7 +131,7 @@ if __name__ == "__main__":
     cmd += f" --pool-size-lora {D['pool_size_lora']}"
     cmd += f" --port {args.port}"
     cmd += f" --rank_id {args.rank_id}"
-    cmd += f" --bwd_log_index {args.bwd_log_index}"
+    #cmd += f" --bwd_log_index {args.bwd_log_index}"
 
     if args.enable_finetuning:
         cmd += f" --finetuning_config_path {BASE['finetuning_config_path']}"

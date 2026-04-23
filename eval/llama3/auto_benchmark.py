@@ -390,6 +390,8 @@ async def main() -> None:
     ap.add_argument("--rank_id", type=int, default=0)
     ap.add_argument("--co", action="store_true")  # enable finetuning mode
     ap.add_argument("--graph", action="store_true", default=False)  # enable CUDA graph
+    ap.add_argument("--bwd_graph", action="store_true", default=False)  # enable backward CUDA graph
+    ap.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
     ap.add_argument("--out_csv", default="timeline_results.csv")
 
     # warmup config
@@ -423,6 +425,14 @@ async def main() -> None:
     if args.graph:
         cmd.append("--enable-cuda-graph")
         args.out_csv = args.out_csv.replace(".csv", "_graph.csv")
+    
+    if args.bwd_graph:
+        cmd.append("--enable-bwd-cuda-graph")
+        args.out_csv = args.out_csv.replace(".csv", "_bwd_graph.csv")
+        args.ft_log_path = args.ft_log_path.replace(".csv", "_bwd_graph.csv")
+    
+    cmd.append("--ft_log_path")
+    cmd.append(args.ft_log_path)   
 
     print("[orchestrator] launching:", " ".join(cmd), flush=True)
 

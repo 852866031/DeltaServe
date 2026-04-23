@@ -504,7 +504,7 @@ class RouterManager:
         batch_out = BatchTokenIdOut()
         for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
-            if req.is_finetuning or req.is_reference:
+            if req.is_finetuning:
                 continue
             if req.has_generate_finished:
                 batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.has_generate_finished, req.aborted, req.export_perf_metrics()))
@@ -679,6 +679,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                finetuning_config=args.finetuning_config,
                               )
     input_params.enable_cuda_graph = getattr(args, 'enable_cuda_graph', False)
+    input_params.enable_bwd_cuda_graph = getattr(args, 'enable_bwd_cuda_graph', False)
 
     try:
         router = RouterManager(

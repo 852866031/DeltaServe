@@ -99,6 +99,8 @@ if __name__ == "__main__":
     parser.add_argument("--enable-finetuning", action="store_true")
     parser.add_argument("--enable-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for decode steps")
+    parser.add_argument("--enable-bwd-cuda-graph", action="store_true",
+                        help="Enable CUDA graph capture for backward steps")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
@@ -133,6 +135,9 @@ if __name__ == "__main__":
 
     if args.enable_cuda_graph:
         cmd += " --enable-cuda-graph"
+    
+    if args.enable_bwd_cuda_graph:
+        cmd += " --enable-bwd-cuda-graph"
 
     # unified mem manager etc.
     if D["half_model"]:

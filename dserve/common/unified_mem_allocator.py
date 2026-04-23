@@ -71,7 +71,6 @@ class UnifiedMemoryAllocator:
         self.activation_page_indices = []  # list of tuples: (FFN_input_phys_ids, ATTENTION_input_phys_ids)
         self.finetune_input_ids = []
         self.finetune_logits_per_request = []
-        self.reference_logits_per_request = []
         self.shared_transformer_out_activations = None
         self.shared_attention_out_activations = None
         self.embedding_output = None
@@ -160,7 +159,6 @@ class UnifiedMemoryAllocator:
             self.request_token_info.clear()
             self.finetune_input_ids.clear()
             self.finetune_logits_per_request.clear()
-            self.reference_logits_per_request.clear()
             self.activation_page_indices.clear()
 
             mask = (self.page_type_map == int(PageType.ATTENTION_INPUT_ACTIVATION.value)) | (
