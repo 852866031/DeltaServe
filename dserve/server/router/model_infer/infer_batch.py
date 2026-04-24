@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import collections
 
-from dserve.common.configs.config import setting
+from dserve.common.configs.config import get_active_config
 from dataclasses import dataclass
 from typing import List, Dict
 from dserve.common.mem_manager import MemoryManager
@@ -84,9 +84,10 @@ class InferBatch:
 
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
-        nopad_b_loc = torch.zeros((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
-        nopad_b_loc_key = torch.zeros((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
-        nopad_b_loc_value = torch.zeros((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+        max_req_total_len = get_active_config().serving.max_req_total_len
+        nopad_b_loc = torch.zeros((len(requests), max_req_total_len + 12), dtype=torch.long, device='cuda')
+        nopad_b_loc_key = torch.zeros((len(requests), max_req_total_len + 12), dtype=torch.long, device='cuda')
+        nopad_b_loc_value = torch.zeros((len(requests), max_req_total_len + 12), dtype=torch.long, device='cuda')
 
         nopad_b_start_loc = torch.zeros(len(requests), dtype=torch.int32, device='cuda')
 
@@ -187,11 +188,12 @@ class InferBatch:
 
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
-        nopad_b_loc = torch.zeros((len(request_ids), setting['max_req_total_len'] + 12),
+        max_req_total_len = get_active_config().serving.max_req_total_len
+        nopad_b_loc = torch.zeros((len(request_ids), max_req_total_len + 12),
                                   dtype=torch.long, device='cuda')
-        nopad_b_loc_key = torch.zeros((len(request_ids), setting['max_req_total_len'] + 12),
+        nopad_b_loc_key = torch.zeros((len(request_ids), max_req_total_len + 12),
                                   dtype=torch.long, device='cuda')
-        nopad_b_loc_value = torch.zeros((len(request_ids), setting['max_req_total_len'] + 12),
+        nopad_b_loc_value = torch.zeros((len(request_ids), max_req_total_len + 12),
                                   dtype=torch.long, device='cuda')
         nopad_b_start_loc = torch.zeros(len(request_ids), dtype=torch.int32, device='cuda')
         nopad_b_seq_len = torch.zeros(len(request_ids), dtype=torch.int32, device='cuda')
@@ -353,9 +355,10 @@ class InferBatch:
         nopad_total_token_num = batch1.nopad_total_token_num + batch2.nopad_total_token_num
         nopad_max_len_in_batch = max(batch1.nopad_max_len_in_batch, batch2 .nopad_max_len_in_batch)
         
-        nopad_b_loc = torch.zeros((new_batch_size, setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
-        nopad_b_loc_key = torch.zeros((new_batch_size, setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
-        nopad_b_loc_value = torch.zeros((new_batch_size, setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+        max_req_total_len = get_active_config().serving.max_req_total_len
+        nopad_b_loc = torch.zeros((new_batch_size, max_req_total_len + 12), dtype=torch.long, device='cuda')
+        nopad_b_loc_key = torch.zeros((new_batch_size, max_req_total_len + 12), dtype=torch.long, device='cuda')
+        nopad_b_loc_value = torch.zeros((new_batch_size, max_req_total_len + 12), dtype=torch.long, device='cuda')
 
         nopad_b_start_loc = torch.zeros(new_batch_size, dtype=torch.int32, device='cuda')
         nopad_b_seq_len = torch.zeros(new_batch_size, dtype=torch.int32, device='cuda')

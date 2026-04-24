@@ -1,4 +1,5 @@
-# serving_config.yaml
+# serving_config_no_finetuning.yaml — llama3 inference-only.
+# Picked by launch_llama3.py when --enable-finetuning is NOT set.
 server:
   host: 127.0.0.1
   port: 8000
@@ -31,46 +32,43 @@ lora:
   fair_weights: []
 
 scheduler:
-  name: slora_plus
+  name: dserve
   enable_abort: false
 
 memory:
   enable_unified_mem_manager: true
   unified_mem_manager_max_size_gb: 6
-  # Was: unified_mem_allocator.py:77 hardcoded 1024
-  max_finetuning_tokens: 1024     # use this as default
-  # Was: mem_allocator.py tot_size*10 mystery multiplier
-  activation_pool_multiplier: 10 #remove this, we will not use this later
+  max_finetuning_tokens: 1024
+  unified_mem_manager_log_path: null
 
-graph:  #rename to cuda graph
-  enable_cuda_graph: false         # rename to enable_decode_cuda_graph
-  enable_bwd_cuda_graph: false     # backward FFN graph
-  use_graphed_attention: true      # rename to use_graphed_bwd_attention
+cuda_graph:
+  enable_decode_cuda_graph: false
+  enable_bwd_cuda_graph: false
+  use_graphed_bwd_attention: true
   attn_bn_max: 8
   attn_l_max: 64
-  # Was: SFT_service_graph.py:51 PROFILE_EVERY
-  profile_every: 10                 # remove this, leave it hardcoded
 
+# Finetune machinery is fully disabled. The fields below are inert defaults
+# that mirror what the no_finetuning_config.json carried, kept here so the
+# two YAMLs are diff-friendly.
 finetune:
-  enabled: false                   # when false, no_finetuning path
-  type: SFT                        # SFT | Alignment | Alignment Live | SFT Profile
+  enabled: false
+  type: SFT
   data_path: config/emotion.txt
   lora_path: adapters/llama3-toy-lora-ft
-  reference_lora_path: null        # auto-derived for Alignment
-  num_epochs: 12
-  learning_rate: 0.0001
+  num_epochs: 4
+  learning_rate: 0.001
   weight_decay: 0.01
   gamma: 0.9
-  max_saved_finetuning_tokens: 256
+  max_saved_finetuning_tokens: 128
   max_finetuning_tokens_in_batch: 128
   optimizer_threading: true
-  start_on_launch: true
-  min_backward_sample_count: 8    #remove this parameter
+  start_on_launch: false
   prepare_size: 999999
   log_path: bwd_log.csv
 
 slo:
-  ttft_slo: 0.35
+  ttft_slo: 0.1
   avg_tbt_slo: 0.15
   max_tbt_slo: 0.35
 
@@ -81,9 +79,7 @@ debug:
   no_lora_swap: false
   no_kernel: false
   no_mem_pool: false
-  no_mem_manager_log_path: null
   bmm: false
   profile: false
   enable_gpu_profile: false
   disable_log_stats: false
-  log_stats_interval: 10  #remove this parameter, make it hardcoded

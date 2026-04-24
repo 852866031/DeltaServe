@@ -25,6 +25,7 @@ from ..io_struct import BatchTokenIdOut, AbortReq
 from .stats import Stats
 
 from dserve.server.input_params import InputParams
+from dserve.common.configs.config import set_active_config
 from dserve.models.peft.lora_adapter import get_lora_config
 from dserve.server.router.profiler import AlphaModel, BetaModel
 from dserve.server.router.abort_req_queue import AbortReqQueue
@@ -52,7 +53,7 @@ def get_scheduler(input_params, adapter_dirs):
     elif input_params.scheduler == "slora":
         return ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                         input_params.running_max_req_size)
-    elif input_params.scheduler == "slora_plus":
+    elif input_params.scheduler == "dserve":
         if input_params.finetuning_params.finetuning_type == None or input_params.finetuning_params.finetuning_type == "SFT":
             return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                                 input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params)
@@ -109,8 +110,6 @@ class RouterManager:
         else:
             self.prefetch_stream = None
 
-        pprint(input_params.__dict__)
-        pprint(input_params.finetuning_params.__dict__)
         # get adapter rank
         self.lora_ranks = {}
         for lora_dir in adapter_dirs:
@@ -118,8 +117,10 @@ class RouterManager:
             self.lora_ranks[lora_dir] = config["r"]
         if input_params.finetuning_params.finetuning_lora_path is not None:
             self.lora_ranks[input_params.finetuning_params.finetuning_lora_path] = get_lora_config(adapter_dirs[-1], input_params.dummy)[0]["r"]
-        self.lora_ranks[None] = 0       
-        print(self.lora_ranks)
+        self.lora_ranks[None] = 0
+        print("LoRA adapter ranks:")
+        for k, v in self.lora_ranks.items():
+            print(f"  {k}: r={v}")
         self.running_batch: Batch = None
         self.eos_id = eos_id
         
@@ -650,55 +651,28 @@ class RouterManager:
         print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
 
 def start_router_process(args, router_port, detokenization_port, model_rpc_ports, mode, pipe_writer):
-    input_params = InputParams(max_req_total_len=args.max_req_total_len,
-                               # kv cache manager parameters
-                               max_total_token_num=args.max_total_token_num,
-                               pool_size_lora=args.pool_size_lora,
-                               batch_max_tokens=args.batch_max_tokens,
-                               running_max_req_size=args.running_max_req_size,
-                               # heuristic
-                               swap=args.swap,
-                               prefetch=args.prefetch,
-                               prefetch_size=args.prefetch_size,
-                               scheduler=args.scheduler,
-                               profile=args.profile,
-                               batch_num_adapters=args.batch_num_adapters,
-                               enable_abort=args.enable_abort,
-                               # mem_ratio=args.mem_ratio,
-                               dummy=args.dummy,
-                               no_lora_swap=args.no_lora_swap,
-                               no_lora_compute=args.no_lora_compute,
-                               no_kernel=args.no_kernel,
-                               no_mem_pool=args.no_mem_pool,
-                               bmm=args.bmm,
-                               no_lora=args.no_lora,
-                               fair_weights=args.fair_weights,
-                               model_weightdir=args.model_dir,
-                               tokenizer_mode=args.tokenizer_mode,
-                               trust_remote_code=args.trust_remote_code,
-                               finetuning_config=args.finetuning_config,
-                              )
-    input_params.enable_cuda_graph = getattr(args, 'enable_cuda_graph', False)
-    input_params.enable_bwd_cuda_graph = getattr(args, 'enable_bwd_cuda_graph', False)
+    cfg = args.cfg
+    set_active_config(cfg)
+    input_params = InputParams(cfg)
 
     try:
         router = RouterManager(
-            args.model_dir,
-            args.lora_dirs,
+            cfg.model.dir,
+            list(cfg.lora.adapter_dirs),
             load_way="HF",
-            world_size=args.tp,
-            eos_id=args.eos_id,
+            world_size=cfg.server.tp,
+            eos_id=cfg.model.eos_id,
             router_port=router_port,
             detokenization_port=detokenization_port,
             model_rpc_ports=model_rpc_ports,
             input_params=input_params,
             mode=mode,
-            log_stats = not args.disable_log_stats,
-            log_stats_interval = args.log_stats_interval,
-            half_model=args.half_model,
-            mem_manager_log_path=args.mem_manager_log_path,
-            unified_mem_manager_max_size=args.unified_mem_manager_max_size,
-            enable_gpu_profile=args.enable_gpu_profile
+            log_stats=not cfg.debug.disable_log_stats,
+            log_stats_interval=10,
+            half_model=cfg.model.half_model,
+            mem_manager_log_path=cfg.memory.unified_mem_manager_log_path,
+            unified_mem_manager_max_size=cfg.memory.unified_mem_manager_max_size_gb,
+            enable_gpu_profile=cfg.debug.enable_gpu_profile,
         )
     
         asyncio.run(router.wait_to_model_ready())

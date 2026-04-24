@@ -30,11 +30,13 @@ class Llama3TpPartModel(LlamaTpPartModel):
 
     def __init__(self, tp_rank, world_size, weight_dir,
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[],
-                 dummy=False, half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0):
+                 dummy=False, half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0,
+                 max_finetuning_tokens=1024):
         super().__init__(tp_rank, world_size, weight_dir,
-                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy, 
-                         half_model=half_model, mem_manager_log_path=mem_manager_log_path, 
-                         unified_mem_manager_max_size=unified_mem_manager_max_size)
+                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy,
+                         half_model=half_model, mem_manager_log_path=mem_manager_log_path,
+                         unified_mem_manager_max_size=unified_mem_manager_max_size,
+                         max_finetuning_tokens=max_finetuning_tokens)
 
     def _init_config(self):
         super()._init_config()
@@ -82,13 +84,14 @@ class Llama3TpPartModel(LlamaTpPartModel):
         tp_kv_head_num = self.config["num_key_value_heads"] // self.world_size_
 
         self.mem_manager = self.memory_manager_class(
-            head_num=self.config["num_attention_heads"], 
+            head_num=self.config["num_attention_heads"],
             head_dim=head_dim,
             layer_num=self.config["num_hidden_layers"],
             vocab_size=self.config["vocab_size"],
             dtype=torch.float16,
             max_pool_size=self.unified_mem_manager_max_size,
-            log_path=self.mem_manager_log_path
+            log_path=self.mem_manager_log_path,
+            max_finetuning_tokens=self.max_finetuning_tokens,
         )
         return
     

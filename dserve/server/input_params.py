@@ -1,140 +1,84 @@
-class ServeParams:
-
-    def __init__(
-        self,
-        first_slo,
-        token_slo,
-    ) -> None:
-        self.first_slo = first_slo
-        self.token_slo = token_slo
-        return
-    
-   
-    def to_dict(self):
-        ret = {}
-        ret["first_slo"] = self.first_slo
-        ret["token_slo"] = self.token_slo
-        return ret
+"""
+Thin views over a ServerConfig. Public attributes are kept stable so the ~50
+downstream readers (`self.input_params.foo`, `self.finetuning_params.bar`)
+do not need to change. Future PRs can incrementally rename call sites to read
+`cfg.section.field` directly and then delete these wrappers.
+"""
+from dserve.server.config import ServerConfig
 
 
 class FinetuneParams:
-    def __init__(self, model_weightdir: str,
-                 tokenizor_mode: str,
-                 trust_remote_code: bool,
-                 finetuning_config: dict):
-        self.model_weightdir = model_weightdir
-        self.tokenizor_mode = tokenizor_mode
-        self.trust_remote_code = trust_remote_code
-        if finetuning_config == None:
-            finetuning_config = {}
-        self.finetuning_type = finetuning_config.get("finetuning_type", "SFT")
-        self.finetuning_data_path = finetuning_config.get("finetuning_data_path", None)
-        self.finetuning_prepare_size = finetuning_config.get("finetuning_prepare_size", 0)
-        self.finetuning_lora_path = finetuning_config.get("finetuning_lora_path", None)
-        self.reference_lora_path = finetuning_config.get("reference_lora_path", None)
-        self.learning_rate = finetuning_config.get("learning_rate", 1e-4)
-        self.weight_decay = finetuning_config.get("weight_decay", 0.01)
-        self.gamma = finetuning_config.get("gamma", 0.95)
-        self.alpha = finetuning_config.get("alpha", 0.5)
-        self.beta = finetuning_config.get("beta", 0.02)
-        self.lambdas = finetuning_config.get("lambda", 2)
-        self.eval_steps = finetuning_config.get("eval_steps", 100)
-        self.num_epochs = finetuning_config.get("num_epochs", 1)
-        self.max_saved_finetuning_tokens = finetuning_config.get("max_saved_finetuning_tokens", 512)
-        self.max_finetuning_tokens_in_batch = finetuning_config.get("max_finetuning_tokens_in_batch", 256)
-        self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
-        self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
-        self.start_on_launch = finetuning_config.get("start_on_launch", True)
-        self.ft_log_path = finetuning_config.get("ft_log_path", "")
+    def __init__(self, cfg: ServerConfig):
+        ft = cfg.finetune
+        # Downstream uses `finetuning_lora_path is not None` as the kill switch
+        # for the entire finetune machinery — preserve that behavior by gating
+        # the path-bearing fields on `ft.enabled`.
+        active = ft.enabled
+        self.finetuning_type = ft.type if active else None
+        self.finetuning_data_path = ft.data_path if active else None
+        self.finetuning_lora_path = ft.lora_path if active else None
+        self.learning_rate = ft.learning_rate
+        self.weight_decay = ft.weight_decay
+        self.gamma = ft.gamma
+        self.num_epochs = ft.num_epochs
+        self.max_saved_finetuning_tokens = ft.max_saved_finetuning_tokens
+        self.max_finetuning_tokens_in_batch = ft.max_finetuning_tokens_in_batch
+        self.optimizer_threading = ft.optimizer_threading
+        self.start_on_launch = ft.start_on_launch
+        self.finetuning_prepare_size = ft.prepare_size
+        self.ft_log_path = ft.log_path
+        # Legacy non-finetune fields stashed here historically; kept until
+        # downstream callers are migrated.
+        self.model_weightdir = cfg.model.dir
+        self.tokenizor_mode = cfg.model.tokenizer_mode
+        self.trust_remote_code = cfg.model.trust_remote_code
+        # Eval steps stays at the historical default; not exposed in YAML.
+        self.eval_steps = 100
 
 
 class SLOParams:
-    def __init__(
-        self,
-        ttft_slo,
-        avg_tbt_slo,
-        max_tbt_slo,
-    ) -> None:
-        self.ttft_slo = ttft_slo
-        self.avg_tbt_slo = avg_tbt_slo
-        self.max_tbt_slo = max_tbt_slo
-        return
+    def __init__(self, cfg: ServerConfig):
+        slo = cfg.slo
+        self.ttft_slo = slo.ttft_slo
+        self.avg_tbt_slo = slo.avg_tbt_slo
+        self.max_tbt_slo = slo.max_tbt_slo
+
 
 class InputParams:
+    def __init__(self, cfg: ServerConfig):
+        self.cfg = cfg
 
-    def __init__(
-        self,
-        max_req_total_len,
-        # kv cache manager parameters
-        max_total_token_num,
-        pool_size_lora,
-        batch_max_tokens,
-        running_max_req_size,
-        # mem_ratio,
-        # adapter_ratio,
-        # heuristic
-        swap,
-        prefetch,
-        prefetch_size,
-        scheduler,
-        profile,
-        batch_num_adapters,
-        enable_abort,
-        # kernel,
-        # # debug
-        dummy,
-        no_lora_compute,
-        no_lora_swap,
-        # no_lora_copy,
-        no_kernel,
-        no_mem_pool,
-        bmm,
-        no_lora,
-        # fairness
-        fair_weights,
-        # finetuning parameters
-        model_weightdir,
-        tokenizer_mode,
-        trust_remote_code=True,
-        finetuning_config = {},
-    ) -> None:
-        self.max_req_total_len = max_req_total_len
-        self.max_total_token_num = max_total_token_num
-        self.pool_size_lora = pool_size_lora
-        self.batch_max_tokens = batch_max_tokens
-        self.running_max_req_size = running_max_req_size
-        # self.mem_ratio = mem_ratio
-        # self.adapter_ratio = adapter_ratio
+        # serving
+        self.max_req_total_len = cfg.serving.max_req_total_len
+        self.max_total_token_num = cfg.serving.max_total_token_num
+        self.batch_max_tokens = cfg.serving.batch_max_tokens
+        self.running_max_req_size = cfg.serving.running_max_req_size
 
-        self.swap = swap
-        self.prefetch = prefetch
-        self.prefetch_size = prefetch_size
-        self.scheduler = scheduler
-        self.profile = profile
-        self.batch_num_adapters = batch_num_adapters
-        self.enable_abort = enable_abort
-        # self.kernel = kernel
+        # lora
+        self.pool_size_lora = cfg.lora.pool_size_lora
+        self.swap = cfg.lora.swap
+        self.prefetch = cfg.lora.prefetch
+        self.prefetch_size = cfg.lora.prefetch_size
+        self.batch_num_adapters = cfg.lora.batch_num_adapters
+        self.fair_weights = list(cfg.lora.fair_weights)
 
-        self.dummy = dummy
-        self.no_lora_compute = no_lora_compute
-        self.no_lora_swap = no_lora_swap
-        # self.no_lora_copy = no_lora_copy
-        self.no_kernel = no_kernel
-        self.no_mem_pool = no_mem_pool
-        self.bmm = bmm
-        self.no_lora = no_lora
-        self.enable_cuda_graph = False  # set externally after construction
+        # scheduler
+        self.scheduler = cfg.scheduler.name
+        self.enable_abort = cfg.scheduler.enable_abort
 
-        self.finetuning_params = FinetuneParams(
-            model_weightdir=model_weightdir,
-            tokenizor_mode=tokenizer_mode,
-            trust_remote_code=trust_remote_code,
-            finetuning_config=finetuning_config,
-        )
-        self.slo_params = SLOParams(
-            ttft_slo=finetuning_config.get("ttft_slo", 0.3),
-            avg_tbt_slo=finetuning_config.get("avg_tbt_slo", 0.15),
-            max_tbt_slo=finetuning_config.get("max_tbt_slo", 0.4),
-        )
-        return
- 
+        # cuda graph (legacy attribute names preserved for downstream callers)
+        self.enable_cuda_graph = cfg.cuda_graph.enable_decode_cuda_graph
+        self.enable_bwd_cuda_graph = cfg.cuda_graph.enable_bwd_cuda_graph
+
+        # debug
+        self.dummy = cfg.debug.dummy
+        self.no_lora = cfg.debug.no_lora
+        self.no_lora_compute = cfg.debug.no_lora_compute
+        self.no_lora_swap = cfg.debug.no_lora_swap
+        self.no_kernel = cfg.debug.no_kernel
+        self.no_mem_pool = cfg.debug.no_mem_pool
+        self.bmm = cfg.debug.bmm
+        self.profile = cfg.debug.profile
+
+        self.finetuning_params = FinetuneParams(cfg)
+        self.slo_params = SLOParams(cfg)

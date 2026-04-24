@@ -61,13 +61,8 @@ class Llama3SFTBackwardService(LlamaSFTBackwardService):
     Everything else (loss, FFN backward, etc.) is inherited.
     """
 
-    # Fixed-shape padding budget for _backpop_attention_padded. Every real
-    # fine-tuning batch must satisfy: Bn <= ATTN_BN_MAX and
-    # max(seq_lens) <= ATTN_L_MAX. ATTN_BN_MAX * ATTN_L_MAX is the total
-    # number of token slots the padded attention operates on — strictly
-    # greater than the real S_total is fine (padded slots get masked out).
-    ATTN_BN_MAX: int = 8
-    ATTN_L_MAX: int = 64
+    # ATTN_BN_MAX, ATTN_L_MAX, USE_GRAPHED_ATTENTION are now instance attributes
+    # set by the base __init__ from cfg.cuda_graph.
 
     # Tracks whether the one-time startup info line for the padded attention
     # backward has been printed. Class-level so all instances share it.

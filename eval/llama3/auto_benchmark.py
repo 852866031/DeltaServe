@@ -389,7 +389,7 @@ async def main() -> None:
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--rank_id", type=int, default=0)
     ap.add_argument("--co", action="store_true")  # enable finetuning mode
-    ap.add_argument("--graph", action="store_true", default=False)  # enable CUDA graph
+    ap.add_argument("--decode_graph", action="store_true", default=False)  # enable CUDA graph
     ap.add_argument("--bwd_graph", action="store_true", default=False)  # enable backward CUDA graph
     ap.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
     ap.add_argument("--out_csv", default="timeline_results.csv")
@@ -422,7 +422,7 @@ async def main() -> None:
     ]
     if args.co:
         cmd.append("--enable-finetuning")
-    if args.graph:
+    if args.decode_graph:
         cmd.append("--enable-cuda-graph")
         args.out_csv = args.out_csv.replace(".csv", "_graph.csv")
     

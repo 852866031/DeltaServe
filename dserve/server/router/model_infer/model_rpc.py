@@ -24,7 +24,7 @@ from rpyc.utils.classic import obtain
 from transformers.configuration_utils import PretrainedConfig
 from dserve.server.router.model_infer.infer_batch import InferBatch
 
-from dserve.common.configs.config import setting
+from dserve.common.configs.config import set_active_config
 from dserve.models.llama.model import LlamaTpPartModel
 from dserve.models.llama2.model import Llama2TpPartModel
 from dserve.models.peft.lora_adapter import LoraTpPartAdapter
@@ -65,16 +65,20 @@ class ModelRpcServer(rpyc.Service):
         self.load_way = load_way
         self.mode = mode
         self.input_params = input_params
+        # Install the active ServerConfig in this (possibly remote) process so
+        # downstream hot-path code (infer_batch, etc.) can read get_active_config().
+        set_active_config(input_params.cfg)
         self.prefetch_stream = prefetch_stream
 
         self.cache = {}
         self.original_weights = {}
         self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-        nccl_port = setting[f"nccl_port_{use_rank_id}"]
+        nccl_port = input_params.cfg.server.nccl_port + use_rank_id
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{nccl_port}', rank=rank_id, world_size=world_size)
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
         if half_model:
             model_cfg["num_hidden_layers"] = int(model_cfg["num_hidden_layers"] / 2)
+        max_finetuning_tokens = input_params.cfg.memory.max_finetuning_tokens
         try:
             self.model_type = model_cfg["model_type"]
             if self.model_type == "llama":
@@ -83,26 +87,28 @@ class ModelRpcServer(rpyc.Service):
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
                                                     load_way=load_way, mode=mode,
-                                                    dummy=input_params.dummy, 
-                                                    half_model=half_model, 
+                                                    dummy=input_params.dummy,
+                                                    half_model=half_model,
                                                     mem_manager_log_path=mem_manager_log_path,
-                                                    unified_mem_manager_max_size=unified_mem_manager_max_size)
+                                                    unified_mem_manager_max_size=unified_mem_manager_max_size,
+                                                    max_finetuning_tokens=max_finetuning_tokens)
                 elif "num_key_value_heads" in model_cfg.keys():
                     self.model = Llama2TpPartModel(rank_id, world_size, weight_dir,
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
                                                     load_way=load_way, mode=mode,
                                                     dummy=input_params.dummy)
-                    
+
                 else:
                     self.model = LlamaTpPartModel(rank_id, world_size, weight_dir,
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
                                                     load_way=load_way, mode=mode,
-                                                    dummy=input_params.dummy, 
-                                                    half_model=half_model, 
+                                                    dummy=input_params.dummy,
+                                                    half_model=half_model,
                                                     mem_manager_log_path=mem_manager_log_path,
-                                                    unified_mem_manager_max_size=unified_mem_manager_max_size)
+                                                    unified_mem_manager_max_size=unified_mem_manager_max_size,
+                                                    max_finetuning_tokens=max_finetuning_tokens)
                     if gpu_profiler is not None: gpu_profiler.mark_annotation("model_load")
             else:
                 raise Exception(f"can not support {self.model_type} now")
@@ -146,14 +152,18 @@ class ModelRpcServer(rpyc.Service):
                 bwd_recv, rpc_send = Pipe()
                 self.bwd_pause_event = mp.Event()
                 self.bwd_pause_event.set()   # set = RUNNING; clear = PAUSED
+                cg = input_params.cfg.cuda_graph
                 backward_service_obj = self.model.backward_service_class(
                     self.model.config, bwd_recv, bwd_send,
                     lr=input_params.finetuning_params.learning_rate,
                     weight_decay=input_params.finetuning_params.weight_decay,
                     gamma=input_params.finetuning_params.gamma,
-                    use_rank_id = self.use_rank_id,
-                    enable_bwd_graph=getattr(input_params, "enable_bwd_cuda_graph", False),
+                    use_rank_id=self.use_rank_id,
+                    enable_bwd_graph=cg.enable_bwd_cuda_graph,
                     max_saved_finetuning_tokens=input_params.finetuning_params.max_saved_finetuning_tokens,
+                    use_graphed_bwd_attention=cg.use_graphed_bwd_attention,
+                    attn_bn_max=cg.attn_bn_max,
+                    attn_l_max=cg.attn_l_max,
                 )
                 backward_service_obj.bwd_pause_event = self.bwd_pause_event
                 backward_service_obj.receive_model_dict(self.model.export_model_dict())
@@ -169,17 +179,6 @@ class ModelRpcServer(rpyc.Service):
                 self.rpc_send.send(self.finetuning_adapter.load_gpu_fp32_dict())
                 self.rpc_send.send(self.model.mem_manager.share_activation_dict())
                 self.rpc_recv.recv()
-
-            if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
-                ref_adapter_path = input_params.finetuning_params.reference_lora_path
-                self.adapter_id[ref_adapter_path] = len(self.adapters)
-                self.adapters.append(LoraTpPartAdapter(rank_id, world_size, ref_adapter_path, model_cfg,
-                                                    swap=input_params.swap, dummy=input_params.dummy,
-                                                    no_lora_swap=input_params.no_lora_swap,
-                                                        prefetch_stream=prefetch_stream))
-                self.model.backward_engine.setup_alignment(True, alpha=input_params.finetuning_params.alpha,
-                                                           beta=input_params.finetuning_params.beta,
-                                                           lambdas=input_params.finetuning_params.lambdas)
 
         self.adapter_id[None] = len(self.adapters)
         self.adapters.append(None)
@@ -336,18 +335,13 @@ class ModelRpcServer(rpyc.Service):
     def exposed_back_batch(self, current_epoch):
         self.current_epoch = current_epoch
         result = self.backward()
-        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
-            self.model.backward_engine.print_reset_log()
         return result
     
     def backward(self):
-        if self.backward_service is not None:
-            requests_info_dict = self.model.mem_manager.export_requests_info()
-            requests_info_dict["current_epoch"] = self.current_epoch
-            self.rpc_send.send(requests_info_dict)
-            finished, loss, total_token_processed = self.rpc_recv.recv()
-        else:
-            finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
+        requests_info_dict = self.model.mem_manager.export_requests_info()
+        requests_info_dict["current_epoch"] = self.current_epoch
+        self.rpc_send.send(requests_info_dict)
+        finished, loss, total_token_processed = self.rpc_recv.recv()
         if finished:
             self.model.mem_manager.reset_activation_pool()
             return True, loss, total_token_processed

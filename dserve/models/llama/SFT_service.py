@@ -57,14 +57,20 @@ def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
 
 
 class LlamaSFTBackwardService():
-    # When True, _lora_context_backward dispatches to _backpop_attention_padded
-    # (a graph-capturable, fixed-shape variant) if the subclass provides one.
-    # Otherwise, the original variable-shape _backpop_attention is used. Only
-    # llama3 (Llama3SFTBackwardService) defines _backpop_attention_padded;
-    # base llama has no such method, so flipping this flag is a no-op for it.
-    USE_GRAPHED_ATTENTION: bool = True
-
-    def __init__(self, network_config, recv_pipe, send_pipe, lr=1e-4, weight_decay=0.01, gamma=0.95, use_rank_id=0, bwd_log_index=0, enable_bwd_graph=False, max_saved_finetuning_tokens=512):
+    def __init__(self, network_config, recv_pipe, send_pipe, lr=1e-4, weight_decay=0.01, gamma=0.95, use_rank_id=0, bwd_log_index=0, enable_bwd_graph=False, max_saved_finetuning_tokens=512,
+                 use_graphed_bwd_attention=True, attn_bn_max=8, attn_l_max=64):
+        # When True, _lora_context_backward dispatches to _backpop_attention_padded
+        # (a graph-capturable, fixed-shape variant) if the subclass provides one.
+        # Otherwise the original variable-shape _backpop_attention is used. Only
+        # llama3 (Llama3SFTBackwardService) defines _backpop_attention_padded;
+        # base llama has no such method, so flipping this flag is a no-op for it.
+        self.USE_GRAPHED_ATTENTION = use_graphed_bwd_attention
+        # Fixed-shape padding budget for _backpop_attention_padded. Every real
+        # fine-tuning batch must satisfy: Bn <= ATTN_BN_MAX and
+        # max(seq_lens) <= ATTN_L_MAX. Used by the llama3 subclass; harmless
+        # to set here.
+        self.ATTN_BN_MAX = attn_bn_max
+        self.ATTN_L_MAX = attn_l_max
         # Runtime references / constants
         self.eps_ = network_config["rms_norm_eps"]
         self.embed_dim_ = network_config["hidden_size"]

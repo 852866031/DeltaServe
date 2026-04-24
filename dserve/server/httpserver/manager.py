@@ -1,6 +1,4 @@
-import csv
 import json
-import random
 import zmq
 import zmq.asyncio
 import asyncio
@@ -11,7 +9,6 @@ import time
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq, BatchAbortReq, FinetuneReq, FinetuneStatusReq
-from .feedback_collector import FeedbackCollector
 
 class HttpServerManager:
     def __init__(
@@ -25,8 +22,6 @@ class HttpServerManager:
         max_req_total_len,
         trust_remote_code,
         dummy=False,
-        finetuning_data_path=None,
-        live_alignment=False
     ):
         context = zmq.asyncio.Context(3)
         self.send_to_router = context.socket(zmq.PUSH)
@@ -35,11 +30,11 @@ class HttpServerManager:
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
 
-        try: 
-            self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code) 
+        try:
+            self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         except:
             if dummy:
-                self.tokenizer = get_tokenizer("huggyllama/llama-7b", tokenizor_mode) 
+                self.tokenizer = get_tokenizer("huggyllama/llama-7b", tokenizor_mode)
 
         self.req_id_to_out_inf = {}  # value type (out_str, metadata, finished, event)
 
@@ -47,18 +42,11 @@ class HttpServerManager:
         print("httpserver: total_token_num", total_token_num)
         self.max_req_input_len = max_req_input_len
         self.max_req_total_len = max_req_total_len
-        self.live_alignment = live_alignment
-        if finetuning_data_path!=None and live_alignment:
-            #initilize the thread
-            self.feedback_collector = FeedbackCollector(finetuning_data_path)
-        
+
         self._arrival_count = 0          # how many requests have arrived (since process start)
         self._t_begin = None        # start time of current 1s window
         self._win_count = 0              # arrivals in (t_begin, t_begin+1.0]
         self.finetuning_finished = False
-
-    def update_feedback(self, request_id, label):
-        self.feedback_collector.submit_update(req_id=request_id, label=label)
 
     async def start_finetuning(self):
         print("httpserver: sending start finetuning request to router")
@@ -106,10 +94,6 @@ class HttpServerManager:
 
 
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
-        feedback = False
-        if self.live_alignment and random.random() <= 0.5:
-            self.feedback_collector.submit_update(req_id=request_id, prompt=prompt)
-            feedback = True
         loop = asyncio.get_running_loop()
         prompt_ids = await loop.run_in_executor(None, self.tokenizer.encode, prompt)
         prompt_tokens = len(prompt_ids)
@@ -150,14 +134,10 @@ class HttpServerManager:
                 perf_metrics = {}
             else:
                 out_str, metadata, finished, event, perf_metrics = out
-            if feedback:
-                if out_str == "\n":
-                    out_str = "\\n"
-                self.feedback_collector.submit_update(req_id=request_id, completion=out_str)
             if len(metadata) != 0:
                 self.req_id_to_out_inf[request_id] = ("", {}, finished, event)
                 metadata["prompt_tokens"] = prompt_tokens
-                yield out_str, metadata, finished, feedback, perf_metrics
+                yield out_str, metadata, finished, perf_metrics
             if finished:
                 try:
                     del self.req_id_to_out_inf[request_id]

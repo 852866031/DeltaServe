@@ -42,7 +42,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 
 from dserve.utils.net_utils import alloc_can_use_network_port
-from dserve.common.configs.config import setting
+from .config import ServerConfig, load_config, apply_overrides
 from .api_models import (
     ChatCompletionRequest,
     UsageInfo,
@@ -78,33 +78,6 @@ def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse
 @app.get("/health")
 def healthcheck():
     return "OK"
-
-@app.post("/feedback")
-async def feedback(request: Request) -> Response:
-    try:
-        request_data = await request.json()
-        req_id = request_data["req_id"]
-        label = request_data["label"]
-    except Exception as e:
-        return Response(
-            content=json.dumps({"error": f"Invalid request format: {str(e)}"}),
-            status_code=400,
-            media_type="application/json"
-        )
-
-    if label not in [-1, 1]:
-        return Response(
-            content=json.dumps({"error": "Label must be either 1 or -1."}),
-            status_code=400,
-            media_type="application/json"
-        )
-
-    httpserver_manager.update_feedback(req_id, label)
-    return Response(
-        content=json.dumps({"message": f"Feedback for {req_id} received"}),
-        status_code=200,
-        media_type="application/json"
-    )
 
 @app.post("/start_finetuning")
 async def finetuning_status(request: Request) -> Response:
@@ -177,9 +150,8 @@ async def generate(request: Request) -> Response:
     final_output = []
     count_output_tokens = 0
     tokens = []
-    feedback = False
     perf_metrics = None
-    async for request_output, metadata, finished, feedback, perf_metrics in results_generator:
+    async for request_output, metadata, finished, perf_metrics in results_generator:
         count_output_tokens += 1
         if finished == -1:
             return Response(status_code=499)
@@ -188,7 +160,6 @@ async def generate(request: Request) -> Response:
             await httpserver_manager.abort(request_id)
             return Response(status_code=499)
         final_output.append(request_output)
-        feedback = feedback or False
         if return_details:
             metadata["text"] = request_output
             tokens.append(metadata)
@@ -201,8 +172,6 @@ async def generate(request: Request) -> Response:
         "avg_tbt": perf_metrics[1] if perf_metrics is not None else None,
         "worst_tbt": perf_metrics[2] if perf_metrics is not None else None,
     }
-    if feedback:
-        ret["feedback"] = request_id
     if return_details:
         ret["tokens"] = tokens
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
@@ -235,7 +204,7 @@ async def generate_stream(request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata, finished, _ in results_generator:
+        async for request_output, metadata, finished, _perf in results_generator:
             ret = {
                 "token": {
                     "id": metadata.get("id", None),
@@ -312,12 +281,10 @@ async def generate_batch_stream(raw_request: Request) -> Response:
         final_chunks: List[str] = []
         count_output_tokens = 0
         tokens: List[Dict[str, Any]] = []
-        feedback_triggered = False
 
-        async for request_output, metadata, finished, feedback_flag in gen:
+        async for request_output, metadata, finished, _perf in gen:
             count_output_tokens += 1
             final_chunks.append(request_output)
-            feedback_triggered = feedback_triggered or bool(feedback_flag)
             if return_details:
                 md = dict(metadata) if metadata is not None else {}
                 md["text"] = request_output
@@ -329,8 +296,6 @@ async def generate_batch_stream(raw_request: Request) -> Response:
             "generated_text": "".join(final_chunks),
             "count_output_tokens": count_output_tokens,
         }
-        if feedback_triggered:
-            result["feedback"] = req_id
         if return_details:
             result["tokens"] = tokens
         return result
@@ -532,173 +497,91 @@ def print_mem_stats(args):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser = argparse.ArgumentParser(
+        description="DeltaServe API server. Configured via a single "
+                    "serving_config.yaml; see eval/llama3/config/serving_config.yaml.")
+    parser.add_argument("--config", type=str, required=True,
+                        help="Path to a serving_config.yaml (the single source of truth).")
+    parser.add_argument("--override", type=str, default=[], action="append",
+                        help="Dotted-path override, e.g. "
+                             "--override serving.max_total_token_num=30000. "
+                             "May be passed multiple times.")
+    # Per-invocation shortcuts. These are the two knobs that vary essentially
+    # every launch (port collisions, multi-GPU rank assignment) so they get
+    # direct flags. Anything else uses --override.
+    parser.add_argument("--port", type=int, default=None,
+                        help="Override server.port from the YAML.")
+    parser.add_argument("--rank_id", type=int, default=None,
+                        help="Override server.rank_id from the YAML.")
 
-    parser.add_argument("--model_dir", type=str, default=None,
-                        help="the model weight dir path, the app will load config, weights and tokenizer from this dir")
-    parser.add_argument("--tokenizer_mode", type=str, default="slow",
-                        help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test, 
-                        when you want to get best performance, try auto mode""")
-    parser.add_argument("--max_total_token_num", type=int, default=6000,
-                        help="the total token nums the gpu and model can support, equals = max_batch * (input_len + output_len)")
-    parser.add_argument("--batch_max_tokens", type=int, default=None,
-                        help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM")
-    parser.add_argument("--eos_id", type=int, default=2,
-                        help="eos stop token id")
-    parser.add_argument("--running_max_req_size", type=int, default=1000,
-                        help="the max size for forward requests in the same time")
-    parser.add_argument("--tp", type=int, default=1,
-                        help="model tp parral size, the default is 1")
-    parser.add_argument("--rank_id", type=int, default=0,
-                        help="GPU rank ID, the default is 0")
-    parser.add_argument("--max_req_input_len", type=int, default=512,
-                        help="the max value for req input tokens num")
-    parser.add_argument("--max_req_total_len", type=int, default=1024,
-                        help="the max value for req_input_len + req_output_len")
-    parser.add_argument("--nccl_port", type=int, default=28765,
-                        help="the nccl_port to build a distributed environment for PyTorch")
-    parser.add_argument("--mode", type=str, default=[], nargs='+',
-                        help="Model mode: [int8kv] [int8weight | int4weight]")
-    parser.add_argument("--trust_remote_code", action='store_true',
-                        help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
-    parser.add_argument("--disable_log_stats", action='store_true',
-                        help="disable logging throughput stats.")
-    parser.add_argument("--log_stats_interval", type=int, default=10,
-                        help="log stats interval in second.")
-
-    ''' slora arguments '''
-    parser.add_argument("--lora-dirs", type=str, default=[], action="append",
-                        help="the adapter weight dirs associate with base model dir")
-    parser.add_argument("--fair-weights", type=int, default=[], action="append")
-    parser.add_argument("--dummy", action="store_true")
-    parser.add_argument("--swap", action="store_true")
-    parser.add_argument("--pool-size-lora", type=int, default=0)
-    parser.add_argument("--prefetch", action="store_true")
-    parser.add_argument("--prefetch-size", type=int, default=0)
-   
-    parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--batch-num-adapters", type=int, default=None)
-    parser.add_argument("--enable-abort", action="store_true")
-
-    # debug parameters
-    # do not use no-lora-swap, does not rule out the swap over MemAllocator
-    parser.add_argument("--no-lora-swap", action="store_true")
-    parser.add_argument("--no-lora-compute", action="store_true")
-    parser.add_argument("--no-kernel", action="store_true")
-    parser.add_argument("--no-mem-pool", action="store_true")
-    parser.add_argument("--bmm", action="store_true")
-    parser.add_argument("--no-lora", action="store_true")
-    ''' end of slora arguments '''
-    ''' finetune arguments '''
-    parser.add_argument("--scheduler", type=str, default="slora_plus")
-    parser.add_argument("--finetuning_config_path", type=str, default="")
-    parser.add_argument("--mem_manager_log_path", type=str, default=None)
-    parser.add_argument("--half_model", action="store_true")
-    parser.add_argument("--enable_unified_mem_manager", action="store_true")
-    parser.add_argument("--unified_mem_manager_max_size", type=int, default=5,help="in GB")
-    parser.add_argument("--enable_gpu_profile", action="store_true")
-    parser.add_argument("--ft_log_path", type=str, default="")
-    ''' end of finetune arguments '''
-
-    ''' cuda graph arguments '''
-    parser.add_argument("--enable-cuda-graph", action="store_true",
-                        help="Enable CUDA graph capture for decode steps to reduce kernel launch overhead")
-    parser.add_argument("--enable-bwd-cuda-graph", action="store_true",
-                        help="Enable CUDA graph capture for the SFT backward FFN path (experimental)")
-    
     args = parser.parse_args()
-    args.finetuning_config = {}
-    launch_on_start = True
-    if args.finetuning_config_path != "":
-        with open(args.finetuning_config_path, "r") as f:
-            config_data = json.load(f)
 
-        # Assert required keys
-        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs", "finetuning_type", "ttft_slo", "avg_tbt_slo", "max_tbt_slo"]
-        if config_data['finetuning_type'] == "Alignment Live":
-            required_keys.append("min_backward_sample_count")
-        for key in required_keys:
-            assert key in config_data, f"Finetuning config missing required config entry: '{key}'"
+    # ── Build the single ServerConfig that drives everything downstream ──
+    cfg = load_config(args.config)
+    apply_overrides(cfg, args.override)
+    if args.port is not None:
+        cfg.server.port = args.port
+    if args.rank_id is not None:
+        cfg.server.rank_id = args.rank_id
 
-        # Set default values for optional keys if missing
-         # Fill in defaults
-        default_config = {
-            "finetuning_prepare_size": "999999",
-            "learning_rate": 1e-3,
-            "weight_decay": 0.01,
-            "gamma": 0.9,
-            "optimizer_threading": False,
-            "start_on_launch": True,
-            "ft_log_path": args.ft_log_path
-        }
-        for key, default_value in default_config.items():
-            config_data.setdefault(key, default_value)
+    # Post-cfg setup that applies regardless of source.
+    if cfg.finetune.enabled:
+        # Append the finetune adapter to the loaded LoRA list.
+        if cfg.finetune.lora_path \
+                and cfg.finetune.lora_path not in cfg.lora.adapter_dirs:
+            cfg.lora.adapter_dirs.append(cfg.finetune.lora_path)
+        # Finetuning runs on the dserve scheduler.
+        cfg.scheduler.name = "dserve"
 
-        if (config_data['finetuning_type'] == "Alignment" or config_data['finetuning_type'] == "Alignment Live") \
-                                                            and "reference_lora_path" not in config_data:
-            config_data["reference_lora_path"] = str(config_data['finetuning_lora_path'] + "_ref")
-            args.lora_dirs.append(config_data['reference_lora_path'])
-        
-        if config_data['finetuning_type'] == "Alignment Live":
-            from pathlib import Path
-            file_path = Path(config_data["finetuning_data_path"])
-            file_path.parent.mkdir(parents=True, exist_ok=True) 
-            is_new = not file_path.exists()
-            file_path.touch(exist_ok=True)
-            if is_new:
-                with file_path.open("a") as f:
-                    f.write("prompt,completion,label" + "\n")
-
-        args.scheduler = "slora_plus"
-        args.lora_dirs.append(config_data['finetuning_lora_path'])
-        args.finetuning_config = config_data
-        launch_on_start = config_data.get("start_on_launch", True)
-        
-
-    assert args.max_req_input_len < args.max_req_total_len
-    setting["max_req_total_len"] = args.max_req_total_len
-    setting["nccl_port"] = args.nccl_port
-
-    if args.batch_max_tokens is None:
-        batch_max_tokens = int(1/5 * args.max_total_token_num)
-        batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
-        args.batch_max_tokens = batch_max_tokens
-        print(f"max_total_token_num {args.max_total_token_num}")
-        print(f"args.max_req_total_len {args.max_req_total_len}")
-        print(f"batch_max_tokens {batch_max_tokens}")
+    assert cfg.serving.max_req_input_len < cfg.serving.max_req_total_len
+    if cfg.serving.batch_max_tokens is None:
+        batch_max_tokens = int(cfg.serving.max_total_token_num / 5)
+        batch_max_tokens = max(batch_max_tokens, cfg.serving.max_req_total_len)
+        cfg.serving.batch_max_tokens = batch_max_tokens
+        print(f"batch_max_tokens auto-derived: {batch_max_tokens} "
+              f"(max(1/5*max_total_token_num={cfg.serving.max_total_token_num // 5}, "
+              f"max_req_total_len={cfg.serving.max_req_total_len}))")
     else:
-        assert (
-            args.batch_max_tokens >= args.max_req_total_len
-        ), "batch_max_tokens must >= max_req_total_len"
+        assert cfg.serving.batch_max_tokens >= cfg.serving.max_req_total_len, \
+            "batch_max_tokens must be >= max_req_total_len"
+
+    args.cfg = cfg
+    # Mirror a few cfg fields back into args so downstream code that still
+    # reads args.X (e.g. detokenization manager) keeps working without a
+    # second migration pass in this PR.
+    args.model_dir = cfg.model.dir
+    args.tokenizer_mode = cfg.model.tokenizer_mode
+    args.trust_remote_code = cfg.model.trust_remote_code
+    args.dummy = cfg.debug.dummy
+    args.lora_dirs = list(cfg.lora.adapter_dirs)
+    args.mode = list(cfg.model.mode)
+
+    print("Resolved ServerConfig:")
+    print(cfg.pretty())
 
     can_use_ports = alloc_can_use_network_port(
-        num=3 + args.tp, used_nccl_port=args.nccl_port
+        num=3 + cfg.server.tp, used_nccl_port=cfg.server.nccl_port
     )
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
-    router_port += args.rank_id * 10
-    detokenization_port += args.rank_id * 10
-    httpserver_port += args.rank_id * 10
+    router_port += cfg.server.rank_id * 10
+    detokenization_port += cfg.server.rank_id * 10
+    httpserver_port += cfg.server.rank_id * 10
     print(f"router_port: {router_port}, detokenization_port: {detokenization_port}, httpserver_port: {httpserver_port}")
     model_rpc_ports = can_use_ports[3:]
     global httpserver_manager
     httpserver_manager = HttpServerManager(
-        args.model_dir,
-        args.tokenizer_mode,
+        cfg.model.dir,
+        cfg.model.tokenizer_mode,
         router_port=router_port,
         httpserver_port=httpserver_port,
-        total_token_num=args.max_total_token_num,
-        max_req_input_len=args.max_req_input_len,
-        max_req_total_len=args.max_req_total_len,
-        trust_remote_code=args.trust_remote_code,
-        dummy=args.dummy,
-        live_alignment=args.finetuning_config.get("finetuning_type", "SFT") == "Alignment Live",
-        finetuning_data_path=args.finetuning_config.get("finetuning_data_path", None)
+        total_token_num=cfg.serving.max_total_token_num,
+        max_req_input_len=cfg.serving.max_req_input_len,
+        max_req_total_len=cfg.serving.max_req_total_len,
+        trust_remote_code=cfg.model.trust_remote_code,
+        dummy=cfg.debug.dummy,
     )
-    if args.finetuning_config_path != "":
-        if not launch_on_start:
-            httpserver_manager.finetuning_finished = True
+    if cfg.finetune.enabled and not cfg.finetune.start_on_launch:
+        httpserver_manager.finetuning_finished = True
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
     proc_router = mp.Process(
@@ -746,8 +629,8 @@ def main():
 
     uvicorn.run(
         app,
-        host=args.host,
-        port=args.port,
+        host=cfg.server.host,
+        port=cfg.server.port,
         log_level="debug",
         timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
         loop="uvloop",

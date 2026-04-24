@@ -35,13 +35,15 @@ class LlamaTpPartModel(TpPartBaseModel):
 
     backward_service_class = LlamaSFTBackwardService
 
-    def __init__(self, tp_rank, world_size, weight_dir, 
-                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
-                 half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0):
+    def __init__(self, tp_rank, world_size, weight_dir,
+                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False,
+                 half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0,
+                 max_finetuning_tokens=1024):
         super().__init__(tp_rank, world_size, weight_dir,
-                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy, 
-                         half_model=half_model, mem_manager_log_path=mem_manager_log_path, 
-                         unified_mem_manager_max_size=unified_mem_manager_max_size)
+                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy,
+                         half_model=half_model, mem_manager_log_path=mem_manager_log_path,
+                         unified_mem_manager_max_size=unified_mem_manager_max_size,
+                         max_finetuning_tokens=max_finetuning_tokens)
         return
     
     def export_model_dict(self):
@@ -76,8 +78,9 @@ class LlamaTpPartModel(TpPartBaseModel):
             layer_num=self.config["num_hidden_layers"],
             vocab_size=self.config["vocab_size"],
             dtype=torch.float16,
-            max_pool_size = self.unified_mem_manager_max_size,
-            log_path=self.mem_manager_log_path
+            max_pool_size=self.unified_mem_manager_max_size,
+            log_path=self.mem_manager_log_path,
+            max_finetuning_tokens=self.max_finetuning_tokens,
         )
 
 

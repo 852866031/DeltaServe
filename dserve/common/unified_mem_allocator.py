@@ -37,7 +37,8 @@ class UnifiedMemoryAllocator:
     """
 
     def __init__(self, head_num, head_dim, vocab_size, layer_num: int,
-                 max_pool_size: int, dtype=torch.float16, device="cuda", log_path=None):
+                 max_pool_size: int, dtype=torch.float16, device="cuda", log_path=None,
+                 max_finetuning_tokens: int = 1024):
         self.head_dim = head_dim
         self.head_num = head_num
         self.hidden_dim = head_num * head_dim
@@ -74,7 +75,7 @@ class UnifiedMemoryAllocator:
         self.shared_transformer_out_activations = None
         self.shared_attention_out_activations = None
         self.embedding_output = None
-        self.max_finetuning_tokens = 1024
+        self.max_finetuning_tokens = max_finetuning_tokens
         self.init_shared_activation_memory()
 
     def _num_free_gpu_slots(self) -> int:

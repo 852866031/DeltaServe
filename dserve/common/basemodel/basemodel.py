@@ -28,8 +28,9 @@ class TpPartBaseModel:
     infer_state_class = InferStateInfo
 
     def __init__(self, tp_rank, world_size, weight_dir,
-                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
-                 half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0):
+                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False,
+                 half_model=False, mem_manager_log_path=None, unified_mem_manager_max_size=0,
+                 max_finetuning_tokens=1024):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
@@ -41,6 +42,7 @@ class TpPartBaseModel:
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
         self.unified_mem_manager_max_size = unified_mem_manager_max_size
+        self.max_finetuning_tokens = max_finetuning_tokens
         self._init_config()
         if self.half_model:
             self.config["n_layer"] = int(self.config["n_layer"] / 2)

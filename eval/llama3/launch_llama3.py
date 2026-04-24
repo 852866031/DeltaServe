@@ -1,39 +1,39 @@
+"""
+launch_llama3.py — drives dserve.server.api_server via serving_config.yaml.
+
+The server CLI is intentionally tiny (--config, --override, --port, --rank_id);
+this wrapper just exposes the few knobs researchers vary per launch and
+translates them into YAML overrides.
+
+User flags → YAML overrides:
+    --enable-finetuning      -> finetune.enabled
+    --enable-cuda-graph      -> cuda_graph.enable_decode_cuda_graph
+    --enable-bwd-cuda-graph  -> cuda_graph.enable_bwd_cuda_graph
+    --ft_log_path            -> finetune.log_path
+    --port                   -> server.port (passed through as a direct flag)
+    --rank_id                -> server.rank_id (passed through as a direct flag)
+"""
 import argparse
 import os
+import shlex
+import shutil
 import socket
+import subprocess
 import sys
-import os, subprocess, time, shutil
-import socket
-import requests
-import json
-
 from pathlib import Path
+
+import requests
+import yaml
+
 SCRIPT_DIR = Path(__file__).resolve().parent
+SERVING_CONFIG_FT = SCRIPT_DIR / "config" / "serving_config_finetuning.yaml"
+SERVING_CONFIG_NOFT = SCRIPT_DIR / "config" / "serving_config_no_finetuning.yaml"
+
+# Knobs that don't (yet) have YAML homes.
+ENABLE_GPU_PROFILE = False
 
 
-CONFIG = {
-    "online": {
-        "base_model": "meta-llama/Meta-Llama-3-8B",
-        "adapter_dirs": [
-            str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"),
-        ],
-        "finetuning_config_path": str(SCRIPT_DIR / "config" / "finetuning_config.json"),
-        "no_finetuning_config_path": str(SCRIPT_DIR / "config" / "no_finetuning_config.json"),
-    },
-
-    "defaults": {
-        "half_model": False,
-        "enable_unified_mem_manager": True,
-        "enable_gpu_profile": False,
-        "unified_mem_manager_max_size": 6,
-        "num_adapter": 1,
-        "num_token": 25000,
-        "pool_size_lora": 0,
-    }
-}
-
-def internet_available(timeout=2):
-    """Check internet by pinging HuggingFace DNS & HTTPS."""
+def internet_available(timeout: float = 2) -> bool:
     try:
         socket.gethostbyname("huggingface.co")
         requests.head("https://huggingface.co", timeout=timeout)
@@ -41,49 +41,66 @@ def internet_available(timeout=2):
     except Exception:
         return False
 
-def is_mps_running():
+
+def is_mps_running() -> bool:
     exe = shutil.which("nvidia-cuda-mps-control")
     if not exe:
         return False
     try:
-        p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        out, err = p.communicate("get_server_list\nquit\n", timeout=2.0)
+        p = subprocess.Popen(
+            [exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        p.communicate("get_server_list\nquit\n", timeout=2.0)
         return p.returncode == 0
     except Exception:
         return False
-    
 
 
-def update_json_paths(config_json_path):
+def resolve_paths(yaml_path: Path) -> dict:
     """
-    Update finetuning_data_path and finetuning_lora_path inside the JSON file
-    so they become absolute paths based on the JSON file's location.
+    Resolve the chosen YAML's relative paths to absolute ones, anchored at the
+    YAML's parent-of-config directory. The api_server stores adapter paths in
+    its lora_ranks dict using the exact strings it was given; benchmark
+    clients call with absolute paths, so the YAML strings must be absolute
+    too or the dict lookup misses (KeyError in mixed_req_queue).
     """
-    config_json_path = Path(config_json_path).resolve()
-    config_dir = config_json_path.parent
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f) or {}
+    ft = cfg.get("finetune", {}) or {}
+    lora = cfg.get("lora", {}) or {}
+    project_root = yaml_path.parent.parent  # eval/llama3/
+    data_name = Path(ft.get("data_path") or "").name
+    ft_lora_name = Path(ft.get("lora_path") or "").name
+    # Only resolve relative entries that actually exist as local paths under
+    # project_root. HuggingFace IDs like "tloen/alpaca-lora-7b" are left as-is.
+    adapter_dirs = []
+    for d in (lora.get("adapter_dirs") or []):
+        p = Path(d)
+        if p.is_absolute():
+            adapter_dirs.append(d)
+        elif (project_root / p).exists():
+            adapter_dirs.append(str(project_root / p))
+        else:
+            adapter_dirs.append(d)
+    return {
+        "ft_data_path": str(project_root / "config" / data_name),
+        "ft_lora_path": str(project_root / "adapters" / ft_lora_name),
+        "adapter_dirs": adapter_dirs,
+    }
 
-    with open(config_json_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
 
-    # If your JSON is under .../test/llama3/config/,
-    # then project root is .../test/llama3/
-    project_root = config_dir.parent
+def _bool_lit(v: bool) -> str:
+    return "true" if v else "false"
 
-    config["finetuning_data_path"] = str(project_root / "config" / Path(config["finetuning_data_path"]).name)
-    config["finetuning_lora_path"] = str(project_root / "adapters" / Path(config["finetuning_lora_path"]).name)
 
-    with open(config_json_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"Updated JSON file: {config_json_path}")
+def _yaml_lit(v) -> str:
+    """Inline-YAML-encode a value for use in --override KEY=VALUE."""
+    return yaml.safe_dump(v, default_flow_style=True).strip()
 
 
 if __name__ == "__main__":
-    online = internet_available()
-
-    if online:
-        BASE = CONFIG["online"]
-    else:
+    if not internet_available():
         print("⚠️  WARNING: Internet is not available. Exiting.")
         sys.exit(1)
 
@@ -92,9 +109,6 @@ if __name__ == "__main__":
     #     print("  sudo nvidia-cuda-mps-control -d")
     #     sys.exit(1)
 
-    # -----------------------------------
-    # 👇 Only expose 3 arguments to user
-    # -----------------------------------
     parser = argparse.ArgumentParser()
     parser.add_argument("--enable-finetuning", action="store_true")
     parser.add_argument("--enable-cuda-graph", action="store_true",
@@ -103,51 +117,34 @@ if __name__ == "__main__":
                         help="Enable CUDA graph capture for backward steps")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
-
+    parser.add_argument("--ft_log_path", type=str,
+                        default=str(SCRIPT_DIR / "bwd_log.csv"))
     args = parser.parse_args()
 
-    # Load defaults
-    D = CONFIG["defaults"]
+    config_path = SERVING_CONFIG_FT if args.enable_finetuning else SERVING_CONFIG_NOFT
+    abs_paths = resolve_paths(config_path)
 
-    # -----------------------------------
-    # construct CMD (no behavior changed)
-    # -----------------------------------
-    cmd = f"python -m dserve.server.api_server --max_total_token_num {D['num_token']}"
-    cmd += f" --model {BASE['base_model']}"
-    cmd += f" --tokenizer_mode auto"
-    cmd += f" --pool-size-lora {D['pool_size_lora']}"
-    cmd += f" --port {args.port}"
-    cmd += f" --rank_id {args.rank_id}"
-    cmd += f" --ft_log_path {args.ft_log_path}"
+    overrides = [
+        f"finetune.log_path={args.ft_log_path}",
+        f"finetune.data_path={abs_paths['ft_data_path']}",
+        f"finetune.lora_path={abs_paths['ft_lora_path']}",
+        f"lora.adapter_dirs={_yaml_lit(abs_paths['adapter_dirs'])}",
+        f"cuda_graph.enable_decode_cuda_graph={_bool_lit(args.enable_cuda_graph)}",
+        f"cuda_graph.enable_bwd_cuda_graph={_bool_lit(args.enable_bwd_cuda_graph)}",
+    ]
 
-    if args.enable_finetuning:
-        update_json_paths(BASE["finetuning_config_path"])
-        cmd += f" --finetuning_config_path {BASE['finetuning_config_path']}"
-    else:
-        update_json_paths(BASE["no_finetuning_config_path"])
-        cmd += f" --finetuning_config_path {BASE['no_finetuning_config_path']}"
+    parts = ["python", "-m", "dserve.server.api_server",
+             "--config", str(config_path),
+             "--port", str(args.port),
+             "--rank_id", str(args.rank_id)]
+    for o in overrides:
+        parts += ["--override", o]
 
-    # adapter dirs
-    for adapter_dir in BASE["adapter_dirs"]:
-        cmd += f" --lora {adapter_dir}"
-    cmd += " --swap"
-
-    if args.enable_cuda_graph:
-        cmd += " --enable-cuda-graph"
-    
-    if args.enable_bwd_cuda_graph:
-        cmd += " --enable-bwd-cuda-graph"
-
-    # unified mem manager etc.
-    if D["half_model"]:
-        cmd += " --half_model"
-    if D["enable_unified_mem_manager"]:
-        cmd += " --enable_unified_mem_manager"
-        cmd += f" --unified_mem_manager_max_size {D['unified_mem_manager_max_size']}"
-    if D["enable_gpu_profile"]:
-        profile_cmd = f"nsys profile --cuda-memory-usage=true --trace-fork-before-exec=true --force-overwrite true -o trace "
-        cmd = profile_cmd + cmd
+    cmd = " ".join(shlex.quote(p) for p in parts)
+    if ENABLE_GPU_PROFILE:
+        cmd = ("nsys profile --cuda-memory-usage=true "
+               "--trace-fork-before-exec=true --force-overwrite true "
+               "-o trace " + cmd)
 
     print(cmd)
     os.system(cmd)
