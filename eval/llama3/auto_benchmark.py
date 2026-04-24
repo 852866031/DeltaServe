@@ -389,14 +389,17 @@ async def main() -> None:
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--rank_id", type=int, default=0)
     ap.add_argument("--co", action="store_true")  # enable finetuning mode
-    ap.add_argument("--decode_graph", action="store_true", default=False)  # enable CUDA graph
-    ap.add_argument("--bwd_graph", action="store_true", default=False)  # enable backward CUDA graph
-    ap.add_argument("--ft_log_path", type=str, default=str(SCRIPT_DIR / "bwd_log.csv"))
+    ap.add_argument("--decode_graph", action="store_true", default=False)     # decode  CUDA graph
+    ap.add_argument("--prefill_graph", action="store_true", default=False)    # prefill CUDA graph
+    ap.add_argument("--bwd_graph", action="store_true", default=False)        # backward CUDA graph
+    # ft_log_path and out_csv default to base names; final paths are composed
+    # below under OUTPUT_DIR with a suffix encoding which graphs are enabled.
+    ap.add_argument("--ft_log_path", type=str, default="bwd_log.csv")
     ap.add_argument("--out_csv", default="timeline_results.csv")
 
     # warmup config
-    ap.add_argument("--warmup_count", type=int, default=15)
-    ap.add_argument("--warmup_duration_s", type=float, default=3.0)
+    ap.add_argument("--warmup_count", type=int, default=40)
+    ap.add_argument("--warmup_duration_s", type=float, default=5.0)
     ap.add_argument("--warmup_rest_s", type=float, default=2.0)
 
     args = ap.parse_args()
@@ -411,6 +414,34 @@ async def main() -> None:
 
     server = f"http://127.0.0.1:{args.port}"
 
+    # Output paths: everything goes under eval/llama3/output/, with a suffix
+    # tag that encodes which CUDA graphs are enabled so multiple runs don't
+    # overwrite each other. Order is fixed: decode < prefill < bwd.
+    output_dir = SCRIPT_DIR / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tags = []
+    if args.decode_graph:
+        tags.append("decode")
+    if args.prefill_graph:
+        tags.append("prefill")
+    if args.bwd_graph:
+        tags.append("bwd")
+    suffix = ("_" + "_".join(tags)) if tags else ""
+
+    def _tagged(filename: str, prefer_arg_path: bool = False) -> str:
+        """Stamp the suffix into filename.stem and anchor under output_dir,
+        unless the caller passed an absolute/relative-with-dir path.
+        """
+        p = Path(filename)
+        if prefer_arg_path and (p.is_absolute() or len(p.parts) > 1):
+            # User gave an explicit path — keep it verbatim, just stamp the tag.
+            return str(p.with_name(p.stem + suffix + p.suffix))
+        return str(output_dir / (p.stem + suffix + p.suffix))
+
+    args.out_csv = _tagged(args.out_csv, prefer_arg_path=True)
+    args.ft_log_path = _tagged(args.ft_log_path, prefer_arg_path=True)
+
     cmd = [
         sys.executable,
         "-u",
@@ -424,17 +455,17 @@ async def main() -> None:
         cmd.append("--enable-finetuning")
     if args.decode_graph:
         cmd.append("--enable-cuda-graph")
-        args.out_csv = args.out_csv.replace(".csv", "_graph.csv")
-    
+    if args.prefill_graph:
+        cmd.append("--enable-prefill-cuda-graph")
     if args.bwd_graph:
         cmd.append("--enable-bwd-cuda-graph")
-        args.out_csv = args.out_csv.replace(".csv", "_bwd_graph.csv")
-        args.ft_log_path = args.ft_log_path.replace(".csv", "_bwd_graph.csv")
-    
+
     cmd.append("--ft_log_path")
-    cmd.append(args.ft_log_path)   
+    cmd.append(args.ft_log_path)
 
     print("[orchestrator] launching:", " ".join(cmd), flush=True)
+    print(f"[orchestrator] writing results CSV to: {args.out_csv}", flush=True)
+    print(f"[orchestrator] writing bwd log CSV to: {args.ft_log_path}", flush=True)
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"

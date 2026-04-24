@@ -74,6 +74,7 @@ class MemorySection:
 @dataclass
 class CudaGraphSection:
     enable_decode_cuda_graph: bool = False
+    enable_prefill_cuda_graph: bool = False
     enable_bwd_cuda_graph: bool = False
     use_graphed_bwd_attention: bool = True
     attn_bn_max: int = 8

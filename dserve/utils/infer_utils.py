@@ -9,17 +9,24 @@ is_show_cost_time = False
 def mark_cost_time(func_name):
     def inner_func(func):
         def time_func(*args, **kwargs):
+            # Skip synchronize() during CUDA graph capture to avoid
+            # "operation not permitted when stream is capturing" errors.
+            capturing = torch.cuda.is_current_stream_capturing() if torch.cuda.is_available() else False
             if dist.get_rank() in [0, 1] and is_show_cost_time:
-                torch.cuda.synchronize()
+                if not capturing:
+                    torch.cuda.synchronize()
                 start_time = time.time()
                 ans = func(*args, **kwargs)
-                torch.cuda.synchronize()
-                print(func_name, "cost time:", (time.time() - start_time) * 1000)
+                if not capturing:
+                    torch.cuda.synchronize()
+                    print(func_name, "cost time:", (time.time() - start_time) * 1000)
                 return ans
             else:
-                torch.cuda.synchronize()
+                if not capturing:
+                    torch.cuda.synchronize()
                 ans = func(*args, **kwargs)
-                torch.cuda.synchronize()
+                if not capturing:
+                    torch.cuda.synchronize()
                 return ans
 
         return time_func

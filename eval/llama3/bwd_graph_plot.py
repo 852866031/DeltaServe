@@ -1,19 +1,20 @@
 """Compare an eager backward run against an --enable-bwd-cuda-graph run.
 
 Reads two timeline_results CSVs and two bwd_log CSVs produced by
-orchestrate_run_timeline.py and replays the comparable plots from
-auto_plot.py side-by-side.
+auto_benchmark.py (which writes under eval/llama3/output/) and replays the
+comparable plots from auto_plot.py side-by-side.
 
-Inputs (fixed paths, all under this directory):
-  - timeline_results.csv           (baseline / eager backward)
-  - timeline_results_bwd_graph.csv (--enable-bwd-cuda-graph)
-  - bwd_log.csv                    (baseline)
-  - bwd_log_bwd_graph.csv          (--enable-bwd-cuda-graph)
+Default inputs (override via CLI):
+  output/timeline_results.csv      (baseline / eager backward)
+  output/timeline_results_bwd.csv  (--bwd_graph run)
+  output/bwd_log.csv               (baseline)
+  output/bwd_log_bwd.csv           (--bwd_graph run)
 
 Output:
-  - bwd_graph_comparison.png
+  plots/bwd_graph_comparison.png
 """
 
+import argparse
 import os
 
 import matplotlib.pyplot as plt
@@ -21,14 +22,16 @@ import numpy as np
 import pandas as pd
 
 
-# ---------------- Fixed paths ----------------
+# ---------------- Paths ----------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(_HERE, "output")
+PLOTS_DIR = os.path.join(_HERE, "plots")
 
-RESULTS_BASELINE = os.path.join(_HERE, "timeline_results.csv")
-RESULTS_BWD_GRAPH = os.path.join(_HERE, "timeline_results_bwd_graph.csv")
-BWD_LOG_BASELINE = os.path.join(_HERE, "bwd_log.csv")
-BWD_LOG_BWD_GRAPH = os.path.join(_HERE, "bwd_log_bwd_graph.csv")
-OUT_PATH = os.path.join(_HERE, "bwd_graph_comparison.png")
+RESULTS_BASELINE = os.path.join(OUTPUT_DIR, "timeline_results.csv")
+RESULTS_BWD_GRAPH = os.path.join(OUTPUT_DIR, "timeline_results_bwd.csv")
+BWD_LOG_BASELINE = os.path.join(OUTPUT_DIR, "bwd_log.csv")
+BWD_LOG_BWD_GRAPH = os.path.join(OUTPUT_DIR, "bwd_log_bwd.csv")
+OUT_PATH = os.path.join(PLOTS_DIR, "bwd_graph_comparison.png")
 
 BASELINE_LABEL = "eager"
 BWD_GRAPH_LABEL = "bwd graph"
@@ -98,11 +101,13 @@ def parse_bwd_log_csv(csv_path: str):
 
 
 # ---------------- Plotting ----------------
-def plot_ttft_percentile(ax, base_results: pd.DataFrame, graph_results: pd.DataFrame):
+def plot_ttft_percentile(ax, base_results: pd.DataFrame, graph_results: pd.DataFrame,
+                         labels=(BASELINE_LABEL, BWD_GRAPH_LABEL),
+                         colors=(BASELINE_COLOR, BWD_GRAPH_COLOR)):
     percentiles = np.array([0, 20, 40, 60, 80, 100])
     for df, label, color in (
-        (base_results, BASELINE_LABEL, BASELINE_COLOR),
-        (graph_results, BWD_GRAPH_LABEL, BWD_GRAPH_COLOR),
+        (base_results, labels[0], colors[0]),
+        (graph_results, labels[1], colors[1]),
     ):
         ttft = df.loc[df["ok"], "ttft_s"].dropna().astype(float).to_numpy()
         if len(ttft) == 0:
@@ -115,10 +120,12 @@ def plot_ttft_percentile(ax, base_results: pd.DataFrame, graph_results: pd.DataF
     ax.legend()
 
 
-def plot_latency_vs_time(ax, base_results: pd.DataFrame, graph_results: pd.DataFrame):
+def plot_latency_vs_time(ax, base_results: pd.DataFrame, graph_results: pd.DataFrame,
+                         labels=(BASELINE_LABEL, BWD_GRAPH_LABEL),
+                         colors=(BASELINE_COLOR, BWD_GRAPH_COLOR)):
     for df, label, color in (
-        (base_results, BASELINE_LABEL, BASELINE_COLOR),
-        (graph_results, BWD_GRAPH_LABEL, BWD_GRAPH_COLOR),
+        (base_results, labels[0], colors[0]),
+        (graph_results, labels[1], colors[1]),
     ):
         ok = df[df["ok"]]
         latencies = ok["latency_s"].astype(float).to_numpy()
@@ -142,15 +149,17 @@ def plot_latency_vs_time(ax, base_results: pd.DataFrame, graph_results: pd.DataF
     ax.legend()
 
 
-def plot_bwd_cumulative(ax, base_log, graph_log):
+def plot_bwd_cumulative(ax, base_log, graph_log,
+                        labels=(BASELINE_LABEL, BWD_GRAPH_LABEL),
+                        colors=(BASELINE_COLOR, BWD_GRAPH_COLOR)):
     base_t, base_cum, base_avg = base_log
     graph_t, graph_cum, graph_avg = graph_log
 
-    base_label = f"{BASELINE_LABEL} ({base_avg:.1f} tok/s)" if np.isfinite(base_avg) else BASELINE_LABEL
-    graph_label = f"{BWD_GRAPH_LABEL} ({graph_avg:.1f} tok/s)" if np.isfinite(graph_avg) else BWD_GRAPH_LABEL
+    base_label = f"{labels[0]} ({base_avg:.1f} tok/s)" if np.isfinite(base_avg) else labels[0]
+    graph_label = f"{labels[1]} ({graph_avg:.1f} tok/s)" if np.isfinite(graph_avg) else labels[1]
 
-    ax.plot(base_t, base_cum, color=BASELINE_COLOR, label=base_label)
-    ax.plot(graph_t, graph_cum, color=BWD_GRAPH_COLOR, label=graph_label)
+    ax.plot(base_t, base_cum, color=colors[0], label=base_label)
+    ax.plot(graph_t, graph_cum, color=colors[1], label=graph_label)
     ax.set_title("Finetuning Cumulative Tokens")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Cumulative Tokens")
@@ -159,13 +168,28 @@ def plot_bwd_cumulative(ax, base_log, graph_log):
 
 # ---------------- Main ----------------
 def main():
-    for p in (RESULTS_BASELINE, RESULTS_BWD_GRAPH, BWD_LOG_BASELINE, BWD_LOG_BWD_GRAPH):
+    ap = argparse.ArgumentParser(
+        description="Compare an eager backward run vs a bwd-cuda-graph run. "
+                    "Defaults assume the tag scheme used by auto_benchmark.py "
+                    "(output/bwd_log.csv vs output/bwd_log_bwd.csv).",
+    )
+    ap.add_argument("--baseline-results", default=RESULTS_BASELINE)
+    ap.add_argument("--bwd-graph-results", default=RESULTS_BWD_GRAPH)
+    ap.add_argument("--baseline-bwd-log", default=BWD_LOG_BASELINE)
+    ap.add_argument("--bwd-graph-bwd-log", default=BWD_LOG_BWD_GRAPH)
+    ap.add_argument("--out", default=OUT_PATH)
+    args = ap.parse_args()
+
+    for p in (args.baseline_results, args.bwd_graph_results,
+              args.baseline_bwd_log, args.bwd_graph_bwd_log):
         ensure_exists(p)
 
-    base_results = load_results(RESULTS_BASELINE)
-    graph_results = load_results(RESULTS_BWD_GRAPH)
-    base_log = parse_bwd_log_csv(BWD_LOG_BASELINE)
-    graph_log = parse_bwd_log_csv(BWD_LOG_BWD_GRAPH)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+
+    base_results = load_results(args.baseline_results)
+    graph_results = load_results(args.bwd_graph_results)
+    base_log = parse_bwd_log_csv(args.baseline_bwd_log)
+    graph_log = parse_bwd_log_csv(args.bwd_graph_bwd_log)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     plot_ttft_percentile(axes[0], base_results, graph_results)
@@ -173,8 +197,8 @@ def main():
     plot_bwd_cumulative(axes[2], base_log, graph_log)
 
     plt.tight_layout()
-    plt.savefig(OUT_PATH, dpi=160)
-    print(f"[bwd_graph_plot] Saved comparison figure to {OUT_PATH}")
+    plt.savefig(args.out, dpi=160)
+    print(f"[bwd_graph_plot] Saved comparison figure to {args.out}")
 
 
 if __name__ == "__main__":

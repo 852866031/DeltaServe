@@ -113,6 +113,9 @@ if __name__ == "__main__":
     parser.add_argument("--enable-finetuning", action="store_true")
     parser.add_argument("--enable-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for decode steps")
+    parser.add_argument("--enable-prefill-cuda-graph", action="store_true",
+                        help="Enable CUDA graph capture for prefill "
+                             "(batch_size=1 full-graph or DSERVE_PIECEWISE_PREFILL=1 piecewise)")
     parser.add_argument("--enable-bwd-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for backward steps")
     parser.add_argument("--rank_id", type=int, default=0)
@@ -130,6 +133,7 @@ if __name__ == "__main__":
         f"finetune.lora_path={abs_paths['ft_lora_path']}",
         f"lora.adapter_dirs={_yaml_lit(abs_paths['adapter_dirs'])}",
         f"cuda_graph.enable_decode_cuda_graph={_bool_lit(args.enable_cuda_graph)}",
+        f"cuda_graph.enable_prefill_cuda_graph={_bool_lit(args.enable_prefill_cuda_graph)}",
         f"cuda_graph.enable_bwd_cuda_graph={_bool_lit(args.enable_bwd_cuda_graph)}",
     ]
 

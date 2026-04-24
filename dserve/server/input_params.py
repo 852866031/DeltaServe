@@ -68,6 +68,7 @@ class InputParams:
 
         # cuda graph (legacy attribute names preserved for downstream callers)
         self.enable_cuda_graph = cfg.cuda_graph.enable_decode_cuda_graph
+        self.enable_prefill_cuda_graph = cfg.cuda_graph.enable_prefill_cuda_graph
         self.enable_bwd_cuda_graph = cfg.cuda_graph.enable_bwd_cuda_graph
 
         # debug

@@ -1,16 +1,23 @@
+import argparse
 import os
 import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# ---------------- Fixed paths ----------------
+# ---------------- Paths ----------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(_HERE, "output")
+PLOTS_DIR = os.path.join(_HERE, "plots")
 
+# Defaults — overridable via CLI. The timeline_live.csv is the workload input
+# (lives next to the launcher); timeline_results and bwd_log come out of
+# auto_benchmark.py under OUTPUT_DIR and may carry a tag suffix like
+# `_decode_bwd` when multiple graph features are enabled.
 TIMELINE_CSV = os.path.join(_HERE, "timeline_live.csv")
-RESULTS_CSV = os.path.join(_HERE, "timeline_results.csv")
-BWD_LOG_CSV = os.path.join(_HERE, "bwd_log.csv")
-OUT_PATH = os.path.join(_HERE, "auto_benchmark_summary.png")
+RESULTS_CSV = os.path.join(OUTPUT_DIR, "timeline_results.csv")
+BWD_LOG_CSV = os.path.join(OUTPUT_DIR, "bwd_log.csv")
+OUT_PATH = os.path.join(PLOTS_DIR, "auto_benchmark_summary.png")
 
 
 # ---------------- Utilities ----------------
@@ -90,13 +97,48 @@ def parse_bwd_log_csv(csv_path: str):
 
 
 # ---------------- Main plotting ----------------
-def main():
-    ensure_exists(TIMELINE_CSV)
-    ensure_exists(RESULTS_CSV)
-    ensure_exists(BWD_LOG_CSV)
+def _tagged_default(base: str, tag: str, ext: str) -> str:
+    """Compose the default CSV/PNG name that auto_benchmark would have written
+    for a given tag suffix (e.g. "_decode_bwd"). Empty tag -> no suffix.
+    """
+    suffix = f"_{tag}" if tag else ""
+    return f"{base}{suffix}{ext}"
 
-    timeline = load_timeline(TIMELINE_CSV)
-    results = load_results(RESULTS_CSV)
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Summarize one auto_benchmark run. "
+                    "Use --tag to select a specific tagged run (e.g. 'decode_bwd') "
+                    "or pass explicit paths.",
+    )
+    ap.add_argument("--tag", default="",
+                    help="Tag suffix used by auto_benchmark (e.g. 'decode', 'bwd', "
+                         "'decode_prefill_bwd'). Empty = baseline, no tag.")
+    ap.add_argument("--timeline-csv", default=TIMELINE_CSV,
+                    help="Workload input CSV (default: eval/llama3/timeline_live.csv).")
+    ap.add_argument("--results-csv", default=None,
+                    help="Per-request results CSV. Default: output/timeline_results{_TAG}.csv.")
+    ap.add_argument("--bwd-log-csv", default=None,
+                    help="Finetune-backward log CSV. Default: output/bwd_log{_TAG}.csv.")
+    ap.add_argument("--out", default=None,
+                    help="Output PNG path. Default: plots/auto_benchmark_summary{_TAG}.png.")
+    args = ap.parse_args()
+
+    results_csv = args.results_csv or os.path.join(
+        OUTPUT_DIR, _tagged_default("timeline_results", args.tag, ".csv"))
+    bwd_log_csv = args.bwd_log_csv or os.path.join(
+        OUTPUT_DIR, _tagged_default("bwd_log", args.tag, ".csv"))
+    out_path = args.out or os.path.join(
+        PLOTS_DIR, _tagged_default("auto_benchmark_summary", args.tag, ".png"))
+
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    ensure_exists(args.timeline_csv)
+    ensure_exists(results_csv)
+    ensure_exists(bwd_log_csv)
+
+    timeline = load_timeline(args.timeline_csv)
+    results = load_results(results_csv)
 
     merged = pd.merge(
         timeline[["idx", "timestamp_s", "prompt_length"]],
@@ -151,7 +193,7 @@ def main():
     ax3.set_ylabel("Latency (s)")
 
     # -------- Plot 4: Finetuning tokens over time (from bwd_log.csv) --------
-    cum_time, cum_tokens, avg_tok_s = parse_bwd_log_csv(BWD_LOG_CSV)
+    cum_time, cum_tokens, avg_tok_s = parse_bwd_log_csv(bwd_log_csv)
 
     ax4.plot(cum_time, cum_tokens)
     ax4.set_title("Finetuning Cumulative Tokens")
@@ -168,8 +210,8 @@ def main():
     )
 
     plt.tight_layout()
-    plt.savefig(OUT_PATH, dpi=160)
-    print(f"[plot_auto] Saved summary figure to {OUT_PATH}")
+    plt.savefig(out_path, dpi=160)
+    print(f"[plot_auto] Saved summary figure to {out_path}")
 
 
 if __name__ == "__main__":

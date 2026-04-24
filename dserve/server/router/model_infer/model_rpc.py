@@ -190,7 +190,7 @@ class ModelRpcServer(rpyc.Service):
                                                         self.model.config["hidden_size"] // head_num)
         else:
             self.infer_adapter = InferAdapterAlt.init(self.model.mem_manager)
-           
+
         set_random_seed(2147483647)
         return
 
@@ -289,7 +289,8 @@ class ModelRpcServer(rpyc.Service):
                     adapters,
                     infer_adapter=self.infer_adapter,
                     finetuning_adapter=self.finetuning_adapter,
-                    enable_cuda_graph=getattr(self.input_params, 'enable_cuda_graph', False))
+                    enable_cuda_graph=getattr(self.input_params, 'enable_cuda_graph', False),
+                    enable_prefill_cuda_graph=getattr(self.input_params, 'enable_prefill_cuda_graph', False))
             kwargs["finetune_mask"] = batch.finetune_mask
             kwargs["b_loc_key"] = batch.nopad_b_loc_key
             kwargs["b_loc_value"] = batch.nopad_b_loc_value
