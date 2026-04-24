@@ -38,7 +38,7 @@ scheduler:
 memory:
   enable_unified_mem_manager: true
   unified_mem_manager_max_size_gb: 6
-  max_finetuning_tokens: 1024
+  max_finetuning_tokens: 256
   unified_mem_manager_log_path: null
 
 cuda_graph:

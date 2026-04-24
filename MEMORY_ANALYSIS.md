@@ -189,9 +189,87 @@ Net difference between `cuda.memory_reserved()` and `cuda.memory_allocated()`.
 
 ---
 
-## 5. Wastes identified
+## 5. Right-sizing the unified memory pool
 
-### Waste A — Activation double-buffer (RECOVERABLE, ~0.5 GB)
+The YAML default `memory.unified_mem_manager_max_size_gb: 6` is roughly **3× larger than this workload needs**. Here is a quick model for picking a tighter value.
+
+### 5.1 Bytes per token in the pool (current, GQA-unaware page layout)
+
+Page shape: `[head_num=32, head_dim=128]` fp16 → **8 KB per page** (`unified_mem_allocator.py:58-62`).
+A page is a global slot — the same physical index exists in all 32 layers, so storing one "logical page" costs `32 layers × 8 KB = 256 KB` across the pool.
+
+| Usage | Pages per token | Bytes per token (all layers) |
+|---|---|---|
+| KV cache (K + V) | 2 | 2 × 256 KB = **0.50 MB** |
+| Finetune activation snapshot (`ATTENTION_INPUT` + `FFN_INPUT`) | 2 | 2 × 256 KB = **0.50 MB** |
+
+### 5.2 Sizing formula
+
+```
+pool_bytes_needed ≈ (N_kv_active + N_ft_active) × 0.5 MB  +  safety
+```
+
+where:
+- `N_kv_active` = number of KV-cached tokens live at steady state ≈ `throughput_tokens_per_sec × avg_request_lifetime_sec`
+- `N_ft_active` = finetune activation tokens live = **`max_saved_finetuning_tokens`** (256 in the current YAML) — never more, because the scheduler triggers backward and `reset_activation_pool` when this cap is hit
+- `safety` ≈ 1× the KV working set to absorb request-arrival bursts before the scheduler evicts
+
+### 5.3 Worked example (the current workload)
+
+Operating point:
+- Aggregate inference throughput ≈ **200 tokens/s**
+- Average request lifetime ≈ 5 s (e.g. 1 s prefill + ~4 s decode at typical rates)
+- `max_saved_finetuning_tokens = 256`
+
+```
+N_kv_active       ≈ 200 × 5        = 1 000 tokens
+N_ft_active       ≈                  256 tokens
+working set       ≈ (1000 + 256) × 0.5 MB  ≈ 0.63 GB
+with 1× safety    ≈                         ≈ 1.3 GB
+```
+
+**⇒ `unified_mem_manager_max_size_gb: 2` is "just more than enough"** for this workload.
+
+Sensitivity table (keeping `max_saved_finetuning_tokens=256`):
+
+| Throughput × lifetime | Active KV | Working + safety | Recommended `max_size_gb` |
+|---|---|---|---|
+| 100 t/s × 5 s = 500 | 500 | ~0.8 GB | **1** |
+| 200 t/s × 5 s = 1000 | 1000 | ~1.3 GB | **2** |
+| 500 t/s × 5 s = 2500 | 2500 | ~2.8 GB | **3** |
+| 1000 t/s × 10 s = 10000 | 10000 | ~10.5 GB | 11 (would need to raise `max_total_token_num` too) |
+
+Upper bound for the current YAML: `max_total_token_num = 25000` → `25000 × 0.5 MB = 12.5 GB` — which the 6 GB pool can't actually hold anyway. The 6 GB value is a compromise between "bigger than any realistic steady-state working set" and "not the hard cap from the YAML." Dropping to **2 GB reclaims ~4 GB of main-process VRAM** for this workload with no observable impact on serving as long as bursts don't exceed ~2500 concurrent KV tokens.
+
+### 5.4 If Waste B (GQA KV oversizing) is fixed
+
+With properly GQA-sized KV pages (2 KB instead of 8 KB), per-token KV cost drops 4×:
+
+| Usage | Bytes per token (all layers) |
+|---|---|
+| KV cache (GQA-sized) | 0.125 MB |
+| Finetune activation (still full hidden_dim) | 0.50 MB |
+
+Same worked example (200 t/s × 5 s, 256 finetune):
+```
+working set ≈ 1000 × 0.125 + 256 × 0.5 = 0.125 + 0.128 = 0.25 GB
+with 1× safety ≈ 0.5 GB
+```
+
+**⇒ post-GQA-fix, `max_size_gb: 1` is comfortably enough.**
+
+### 5.5 How to tune in practice
+
+1. Run a representative workload with `memory.unified_mem_manager_log_path` set to any file path (`unified_mem_allocator.py:40`); the allocator logs the high-water page count per `PageType`.
+2. Multiply the high-water KV-page count by `8 KB × 32 layers / 2` to get the live KV-token count.
+3. Plug into the formula above. Add 30–50% headroom for burst arrivals.
+4. Lower `unified_mem_manager_max_size_gb` to the rounded-up result. `max_total_token_num` can stay at whatever soft ceiling you want — the pool is the real cap.
+
+---
+
+## 6. Wastes identified
+
+### 6.1 Waste A — Activation double-buffer (RECOVERABLE, ~0.5 GB)
 **Where:** `unified_mem_allocator.py:181-196` (permanent allocation) and `:266-278` (per-backward copy).
 
 **What happens:**
@@ -205,21 +283,21 @@ Net difference between `cuda.memory_reserved()` and `cuda.memory_allocated()`.
 
 **Why this exists:** pool pages are scattered per-request; backward wants contiguous `[N, D]`. The copy gathers + densifies.
 
-**Fix:** see §6.1.
+**Fix:** see §7.1.
 
-### Waste B — GQA KV pool oversizing (HARD TO FIX, ~3–4 GB of the 6 GB pool)
+### 6.2 Waste B — GQA KV pool oversizing (HARD TO FIX, ~3–4 GB of the 6 GB pool)
 **Where:** `llama3/model.py:86-95`.
 
 **What happens:** The docstring at `:78-80` states *"KV cache allocator must use KV head count (num_key_value_heads), not num_attention_heads"*, but the code passes `head_num=self.config["num_attention_heads"]` = 32. Each pool page is sized `[1, 32, 128]` = 8 KB to match full hidden_dim, but a Llama-3 GQA KV entry is only `[1, 8, 128]` = 2 KB. Every KV page carries 6 KB of zero padding that no kernel reads.
 
 **Cost at steady state:** if the 6 GB pool were dedicated to KV (it isn't), ~4.5 GB would be zero padding. In the current mixed-use pool (KV + activation pages), the waste is less clean but still substantial — any page used for KV wastes 3/4 of its bytes.
 
-**Why it's hard:** the pool is unified. Activation pages legitimately need 4096 elements (full hidden_dim). A one-line `head_num` change breaks activation storage. See §6.2 for two fix paths.
+**Why it's hard:** the pool is unified. Activation pages legitimately need 4096 elements (full hidden_dim). A one-line `head_num` change breaks activation storage. See §7.2 for two fix paths.
 
-### Waste C — Oversized RoPE cache (TRIVIAL, ~16 MB)
+### 6.3 Waste C — Oversized RoPE cache (TRIVIAL, ~16 MB)
 `llama/model.py:122-123`: `t = torch.arange(max_seq_len + 65536, ...)`. With `max_req_total_len=1024`, only 1024 positions are ever indexed; the extra 65 536 rows add ~16 MB across cos+sin. Drop the `+ 1024*64` or size to `max_req_total_len`.
 
-### Waste D — Main-process fp16+fp32 LoRA copies (MINOR, ~32 MB)
+### 6.4 Waste D — Main-process fp16+fp32 LoRA copies (MINOR, ~32 MB)
 Main keeps both `w_combined_home` (fp16, used for inference) and `w_combined_home_fp32` (fp32, only to be IPC-shared with backward). Unavoidable given the inference/finetune split, flagging for completeness.
 
 ### NOT a waste — `lm_head.float()` / `final_norm.float()` in backward
@@ -227,9 +305,9 @@ Main keeps both `w_combined_home` (fp16, used for inference) and `w_combined_hom
 
 ---
 
-## 6. Proposed fixes
+## 7. Proposed fixes
 
-### 6.1 Fix Waste A — share the pool read-only, gather on the backward side
+### 7.1 Fix Waste A — share the pool read-only, gather on the backward side
 
 The target invariants (no new locks):
 
@@ -338,7 +416,7 @@ def receive_activation_addresses(self, activations_dict):
 - Backward process: +~512 MB transient per backward for the gathered tensors (freed via `del self.activations` on next call).
 - Same gather work, moved one process over. No new locks. One `cuda.synchronize()` per backward.
 
-### 6.2 Fix Waste B — split the unified pool (two options)
+### 7.2 Fix Waste B — split the unified pool (two options)
 
 **Option 1 (lightweight, GQA-only):** keep one pool but change page shape to `[head_dim]` instead of `[head_num, head_dim]`. KV pages allocate 8 × 128 / 128 = 8 pages per token per K or V; activation pages allocate 32 × 128 / 128 = 32 pages per token. Page count quadruples, bitmap operations get proportionally more expensive, but total memory is right-sized. Requires updating every site that assumes a page is `[H, Hd]`.
 
@@ -346,15 +424,22 @@ def receive_activation_addresses(self, activations_dict):
 
 Estimated recoverable at 6 GB pool, 32 layers, Llama-3 GQA: ~4.5 GB of zero-padding in KV pages, minus the activation pages that still need the full 4096-element width. Net win ≈ 3 GB. This is the largest single opportunity in the system but also the biggest change.
 
-### 6.3 Fix Waste C — trim RoPE cache
+### 7.3 Fix Waste C — trim RoPE cache
 `llama/model.py:123`: change `t = torch.arange(max_seq_len + 1024 * 64, ...)` to `t = torch.arange(max_seq_len, ...)` (or `max(max_seq_len, max_req_total_len)`). Saves ~16 MB. One-line fix.
 
-### 6.4 Fix Waste D — defer LoRA fp32 materialization
+### 7.4 Fix Waste D — defer LoRA fp32 materialization
+
 Keep `w_combined_home_fp32` on CPU until the moment it's IPC-shared, then `.cuda()` it and let the backward subprocess be the GPU owner. Saves ~32 MB on main. Low priority.
+
+### 7.5 Fix the pool-size config — **largest config-only win (~4 GB)**
+
+Per §5, the 6 GB default is ~3× oversized for a 200 t/s workload with `max_saved_finetuning_tokens=256`. Set `memory.unified_mem_manager_max_size_gb: 2` in `eval/llama3/config/serving_config_finetuning.yaml` (and the no-finetune counterpart if you touch that path too). Zero code change. Reclaims **~4 GB** from the main process.
+
+Before landing, run the representative workload with `memory.unified_mem_manager_log_path` set and verify the high-water page count stays within the new cap — see §5.5 for the measurement recipe.
 
 ---
 
-## 7. What NOT to change
+## 8. What NOT to change
 
 1. **`lm_head.float()` / `final_norm.float()` at `SFT_service.py:321`.** Required for SFT loss to decrease. Saved as a `feedback` memory; do not re-propose.
 2. **Two CUDA contexts.** Inherent to the MPS-based concurrency model documented in CLAUDE.md. Not a waste, it's the mechanism.
@@ -363,13 +448,14 @@ Keep `w_combined_home_fp32` on CPU until the moment it's IPC-shared, then `.cuda
 
 ---
 
-## 8. Priority summary
+## 9. Priority summary
 
 | Fix | Reclaimable | Risk | Effort |
 |---|---|---|---|
-| 6.3 Trim RoPE cache | ~16 MB | trivial | 1 line |
-| 6.1 Read-only pool sharing | ~512 MB main, simpler handoff | low (no new locks, invariants hold) | ~100 LOC |
-| 6.4 Defer LoRA fp32 to CPU | ~32 MB main | low | ~20 LOC |
-| 6.2 Split KV vs activation pool | ~3 GB main | medium (pool refactor, allocator state touches every page-indexed site) | ~500 LOC |
+| 7.5 Drop `unified_mem_manager_max_size_gb` 6 → 2 | **~4 GB main** | low — measure high-water first | config-only, 1 line |
+| 7.3 Trim RoPE cache | ~16 MB | trivial | 1 line |
+| 7.1 Read-only pool sharing (Waste A) | ~512 MB main, simpler handoff | low (no new locks, invariants hold) | ~100 LOC |
+| 7.4 Defer LoRA fp32 to CPU | ~32 MB main | low | ~20 LOC |
+| 7.2 Split KV vs activation pool (Waste B) | ~3 GB main (more once 7.5 no longer masks it) | medium (pool refactor, allocator state touches every page-indexed site) | ~500 LOC |
 
-Start with 6.3 (free) and 6.1 (highest ratio of impact to risk). 6.2 is a larger patch; prioritize if workloads push `max_total_token_num` higher, since that's where GQA oversizing bites hardest.
+Do **7.5 first** — it's free and reclaims more than all the code changes combined for this workload. Then 7.3, 7.1 in any order. 7.2 is the biggest code patch; prioritize it if workloads push `max_total_token_num` or sustained throughput high enough that GQA oversizing starts to bite even at a tuned `max_size_gb`.
