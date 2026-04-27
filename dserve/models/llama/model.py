@@ -65,14 +65,32 @@ class LlamaTpPartModel(TpPartBaseModel):
         assert self.load_way == "HF", "llama only support HF format to load Now!"
 
     def _init_mem_manager(self):
-        mem_dict = {
-            "int8kv" : INT8KVMemoryManager
-        }
+        # Mode-based override (legacy): "int8kv" wins over cfg.memory.allocator.
+        mem_dict = {"int8kv": INT8KVMemoryManager}
+        override_cls = None
         for _mode in self.mode:
             if _mode in mem_dict:
                 print("Model using mode", _mode)
-                self.memory_manager_class = mem_dict[_mode]
-        self.mem_manager = self.memory_manager_class(
+                override_cls = mem_dict[_mode]
+
+        if override_cls is not None:
+            self.mem_manager = override_cls(
+                head_num=self.config["num_attention_heads"],
+                head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                layer_num=self.config["num_hidden_layers"],
+                vocab_size=self.config["vocab_size"],
+                dtype=torch.float16,
+                max_pool_size=self.unified_mem_manager_max_size,
+                log_path=self.mem_manager_log_path,
+                max_finetuning_tokens=self.max_finetuning_tokens,
+            )
+            return
+
+        from dserve.common.allocator_factory import make_allocator
+        from dserve.common.configs.config import get_active_config
+        cfg = get_active_config()
+        self.mem_manager = make_allocator(
+            cfg.memory.allocator,
             head_num=self.config["num_attention_heads"],
             head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
             layer_num=self.config["num_hidden_layers"],
@@ -81,6 +99,9 @@ class LlamaTpPartModel(TpPartBaseModel):
             max_pool_size=self.unified_mem_manager_max_size,
             log_path=self.mem_manager_log_path,
             max_finetuning_tokens=self.max_finetuning_tokens,
+            num_kv_heads=self.config.get(
+                "num_key_value_heads", self.config["num_attention_heads"]
+            ),
         )
 
 

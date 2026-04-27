@@ -392,6 +392,12 @@ async def main() -> None:
     ap.add_argument("--decode_graph", action="store_true", default=False)     # decode  CUDA graph
     ap.add_argument("--prefill_graph", action="store_true", default=False)    # prefill CUDA graph
     ap.add_argument("--bwd_graph", action="store_true", default=False)        # backward CUDA graph
+    ap.add_argument("--packed_kv", action="store_true", default=False,
+                    help="Use the packed_kv allocator (sets memory.allocator=packed_kv "
+                         "via launch_llama3.py). Tags output filenames with '_kv'.")
+    ap.add_argument("--track_occupancy", action="store_true", default=False,
+                    help="Enable allocator page-occupancy sampling. Writes "
+                         "output/occupancy<suffix>.csv (one row per second).")
     # ft_log_path and out_csv default to base names; final paths are composed
     # below under OUTPUT_DIR with a suffix encoding which graphs are enabled.
     ap.add_argument("--ft_log_path", type=str, default="bwd_log.csv")
@@ -427,6 +433,8 @@ async def main() -> None:
         tags.append("prefill")
     if args.bwd_graph:
         tags.append("bwd")
+    if args.packed_kv:
+        tags.append("kv")
     suffix = ("_" + "_".join(tags)) if tags else ""
 
     def _tagged(filename: str, prefer_arg_path: bool = False) -> str:
@@ -441,6 +449,7 @@ async def main() -> None:
 
     args.out_csv = _tagged(args.out_csv, prefer_arg_path=True)
     args.ft_log_path = _tagged(args.ft_log_path, prefer_arg_path=True)
+    occupancy_log = _tagged("occupancy.csv") if args.track_occupancy else None
 
     cmd = [
         sys.executable,
@@ -459,6 +468,11 @@ async def main() -> None:
         cmd.append("--enable-prefill-cuda-graph")
     if args.bwd_graph:
         cmd.append("--enable-bwd-cuda-graph")
+    if args.packed_kv:
+        cmd.append("--packed-kv")
+    if occupancy_log is not None:
+        cmd.append("--occupancy_log")
+        cmd.append(occupancy_log)
 
     cmd.append("--ft_log_path")
     cmd.append(args.ft_log_path)
@@ -466,6 +480,8 @@ async def main() -> None:
     print("[orchestrator] launching:", " ".join(cmd), flush=True)
     print(f"[orchestrator] writing results CSV to: {args.out_csv}", flush=True)
     print(f"[orchestrator] writing bwd log CSV to: {args.ft_log_path}", flush=True)
+    if occupancy_log is not None:
+        print(f"[orchestrator] writing occupancy CSV to: {occupancy_log}", flush=True)
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"

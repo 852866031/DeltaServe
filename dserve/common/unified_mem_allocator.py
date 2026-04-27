@@ -1,6 +1,11 @@
-import torch
+import os
 import threading
+import time
+from datetime import datetime
 from enum import Enum, auto
+from pathlib import Path
+
+import torch
 
 
 def get_tensor_size_kb(numel: int, dtype: torch.dtype) -> float:
@@ -18,6 +23,76 @@ def get_tensor_size_kb(numel: int, dtype: torch.dtype) -> float:
     }
     bytes_per_element = dtype_size_map[dtype]
     return (numel * bytes_per_element) / 1024
+
+
+class _OccupancyTracker:
+    """Lightweight background sampler logging (used pages / total pages).
+
+    Runs as a daemon thread; no explicit shutdown needed (dies with the
+    process). Samples at `interval_s` (default 1.0s, env-overridable via
+    DSERVE_OCCUPANCY_INTERVAL_S). Each sample reads the allocator's
+    free_bitmap once, derives used = tot_size - free, and appends a row
+    to the configured CSV.
+    """
+
+    def __init__(self, allocator, log_path: str, interval_s: float = 1.0,
+                 label: str = ""):
+        self.allocator = allocator
+        self.log_path = log_path
+        self.interval_s = float(interval_s)
+        self.label = label or type(allocator).__name__
+        self._stop = threading.Event()
+        self._thread = None
+        self._file = None
+        self._t0 = None
+
+    def start(self):
+        Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(self.log_path, "w", buffering=1)
+        self._file.write(
+            "timestamp,t_rel_s,allocator,used_pages,total_pages,occupancy_pct\n"
+        )
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True,
+            name=f"OccupancyTracker-{self.label}",
+        )
+        self._thread.start()
+        print(f"[occupancy:{self.label}] tracking → {self.log_path} "
+              f"(interval={self.interval_s}s)", flush=True)
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self.interval_s + 0.5, 1.0))
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def _loop(self):
+        # Event.wait returns True when set(), False on timeout — so loop
+        # while it timed out (i.e. we weren't asked to stop yet).
+        while not self._stop.wait(self.interval_s):
+            try:
+                self._sample()
+            except Exception as e:
+                print(f"[occupancy:{self.label}] sample error: {e}", flush=True)
+
+    def _sample(self):
+        # CPU-only read. Doing GPU work here can interfere with CUDA-graph
+        # capture/replay running on the inference thread (graph pool
+        # aliasing → silent NaN logits down the line). _used_pages is
+        # maintained incrementally under page_table_lock by every
+        # allocator path that mutates free_bitmap.
+        with self.allocator.page_table_lock:
+            used = int(self.allocator._used_pages)
+            total = int(self.allocator.tot_size)
+        pct = 100.0 * used / total if total > 0 else 0.0
+        ts = datetime.now().isoformat(timespec="milliseconds")
+        t_rel = time.monotonic() - self._t0
+        self._file.write(
+            f"{ts},{t_rel:.3f},{self.label},{used},{total},{pct:.3f}\n"
+        )
 
 
 class PageType(Enum):
@@ -54,7 +129,8 @@ class UnifiedMemoryAllocator:
             / get_tensor_size_kb(self.head_num * self.head_dim, self.dtype)
         )
 
-        # contiguous tensor pool for each layer
+        # contiguous tensor pool for each layer.
+        # NOTE: this attribute is allocator-internal storage.
         self.gpu_pools = [
             torch.empty((self.tot_size, self.head_num, self.head_dim),
                         device=self.device, dtype=self.dtype)
@@ -78,13 +154,46 @@ class UnifiedMemoryAllocator:
         self.max_finetuning_tokens = max_finetuning_tokens
         self.init_shared_activation_memory()
 
+        # CPU-side mirror of (tot_size - free_bitmap.sum()). Maintained
+        # incrementally under page_table_lock by every path that mutates
+        # free_bitmap. The tracker reads this instead of running a GPU
+        # reduction; that matters because GPU work in a background thread
+        # can interfere with CUDA-graph capture/replay on the inference
+        # thread (graph pool aliasing) and produce silent corruption.
+        self._used_pages: int = 0
+
+        # Optional page-occupancy tracker. Runs as a daemon thread so no
+        # explicit shutdown coordination is needed. Activate by setting
+        # cfg.memory.unified_mem_manager_log_path (or passing log_path
+        # directly). Subclasses inherit this for free — the tracker only
+        # reads self._used_pages and tot_size.
+        self.log_path = log_path
+        self._occupancy_tracker = None
+        if log_path:
+            interval = float(os.environ.get("DSERVE_OCCUPANCY_INTERVAL_S", "1.0"))
+            self._occupancy_tracker = _OccupancyTracker(
+                self, log_path, interval_s=interval,
+                label=type(self).__name__,
+            )
+            self._occupancy_tracker.start()
+
+
     def _num_free_gpu_slots(self) -> int:
         """
         Return the number of currently free GPU slots (global across all layers).
         """
         with self.page_table_lock:
             return int(self.free_bitmap.sum().item())
-    
+
+    def get_kv_pool(self, layer_id: int) -> torch.Tensor:
+        return self.gpu_pools[layer_id]
+
+    def get_adapter_pool(self, layer_id: int) -> torch.Tensor:
+        return self.gpu_pools[layer_id]
+
+    def get_activation_pool(self, layer_id: int) -> torch.Tensor:
+        return self.gpu_pools[layer_id]
+
     def alloc(self, num_pages: int, page_type: PageType) -> torch.Tensor:
         """
         Allocate `num_pages` GPU slots globally across all layers.
@@ -100,6 +209,7 @@ class UnifiedMemoryAllocator:
             alloc_ids = free_idx[:num_pages]
             self.free_bitmap[alloc_ids] = False
             self.page_type_map[alloc_ids] = int(page_type.value)
+            self._used_pages += int(num_pages)
             return alloc_ids
 
     def free(self, phys_ids: torch.Tensor):
@@ -112,6 +222,15 @@ class UnifiedMemoryAllocator:
 
             self.page_type_map[phys_ids] = int(PageType.FREE.value)
             self.free_bitmap[phys_ids] = True
+            self._used_pages -= int(phys_ids.numel())
+
+    def free_kv(self, kv_ids: torch.Tensor):
+        """Free KV slots. In the base allocator a KV slot IS a page, so
+        this delegates to free(). PackedKVMemoryAllocator overrides with
+        sub-slot semantics. Callers that free KV (b_loc_key/value entries)
+        MUST go through free_kv — never free() — so the right path is
+        taken regardless of which allocator is in use."""
+        return self.free(kv_ids)
 
     def alloc_contiguous_kv(self, need_size: int, page_type: PageType):
         with self.page_table_lock:
@@ -145,6 +264,7 @@ class UnifiedMemoryAllocator:
             # mark them as used
             self.free_bitmap[phys_all] = False
             self.page_type_map[phys_all] = int(page_type.value)
+            self._used_pages += int(2 * need_size)
 
             # split into K/V halves
             phys_k = phys_all[:need_size]
@@ -171,6 +291,7 @@ class UnifiedMemoryAllocator:
                     pool[idx].zero_()
                 self.page_type_map[idx] = int(PageType.FREE.value)
                 self.free_bitmap[idx] = True
+                self._used_pages -= int(idx.numel())
 
 
     def page_size_kb(self) -> float:
@@ -327,7 +448,7 @@ class UnifiedMemoryAllocator:
         layer_id:    int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with self.page_table_lock:
-            return self.gpu_pools[layer_id], b_loc_key, b_loc_value
+            return self.get_kv_pool(layer_id), b_loc_key, b_loc_value
     
     def to_gpu_index(self, vpids) -> torch.Tensor:
         with self.page_table_lock:

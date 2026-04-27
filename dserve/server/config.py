@@ -69,6 +69,10 @@ class MemorySection:
     unified_mem_manager_max_size_gb: int = 6
     max_finetuning_tokens: int = 1024
     unified_mem_manager_log_path: Optional[str] = None
+    # Allocator implementation. "unified" = page = 1 KV slot (current,
+    # GQA-unaware). "packed_kv" = page = F KV slots where F =
+    # num_attention_heads / num_key_value_heads (GQA-packed).
+    allocator: str = "unified"
 
 
 @dataclass

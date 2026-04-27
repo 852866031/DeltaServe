@@ -170,7 +170,7 @@ class InferBatch:
             remove_index.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
             remove_index.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
         remove_index = torch.cat(remove_index, dim=-1)
-        self.mem_manager.free(remove_index)
+        self.mem_manager.free_kv(remove_index)
         return
         
     # @calculate_time(show=True, min_cost_ms=0)
@@ -210,7 +210,7 @@ class InferBatch:
                 remove_index_kv.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
                 remove_index_kv.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
         remove_index_kv = torch.cat(remove_index_kv, dim=-1)
-        self.mem_manager.free(remove_index_kv)
+        self.mem_manager.free_kv(remove_index_kv)
 
 
         nopad_max_len_in_batch = 0
@@ -286,7 +286,7 @@ class InferBatch:
                         (self.nopad_max_len_in_batch - 1)]
                 )
             remove_index_kv = torch.cat(remove_index_kv, dim=-1)
-            self.mem_manager.free(remove_index_kv)
+            self.mem_manager.free_kv(remove_index_kv)
 
         # --- Step 3: recompute metadata for survivors ---
         new_seq_len = self.nopad_b_seq_len[keep_tensor]

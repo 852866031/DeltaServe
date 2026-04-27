@@ -37,10 +37,10 @@ scheduler:
 
 memory:
   enable_unified_mem_manager: true
-  unified_mem_manager_max_size_gb: 4
+  unified_mem_manager_max_size_gb: 6
   max_finetuning_tokens: 256
   unified_mem_manager_log_path: null
-  allocator: unified
+  allocator: packed_kv
 
 cuda_graph:
   enable_decode_cuda_graph: false

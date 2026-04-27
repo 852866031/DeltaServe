@@ -76,14 +76,18 @@ class Llama3TpPartModel(LlamaTpPartModel):
     
     def _init_mem_manager(self):
         """
-        KV cache allocator must use KV head count (num_key_value_heads), not num_attention_heads.
+        KV cache allocator dispatch via cfg.memory.allocator. The "packed_kv"
+        variant uses num_key_value_heads to pack F = num_attention_heads /
+        num_key_value_heads KV slots per page; "unified" keeps the legacy
+        page=1-KV-slot layout.
         """
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]
 
-        # KV heads per TP rank (KV sharded)
-        tp_kv_head_num = self.config["num_key_value_heads"] // self.world_size_
-
-        self.mem_manager = self.memory_manager_class(
+        from dserve.common.allocator_factory import make_allocator
+        from dserve.common.configs.config import get_active_config
+        cfg = get_active_config()
+        self.mem_manager = make_allocator(
+            cfg.memory.allocator,
             head_num=self.config["num_attention_heads"],
             head_dim=head_dim,
             layer_num=self.config["num_hidden_layers"],
@@ -92,6 +96,7 @@ class Llama3TpPartModel(LlamaTpPartModel):
             max_pool_size=self.unified_mem_manager_max_size,
             log_path=self.mem_manager_log_path,
             max_finetuning_tokens=self.max_finetuning_tokens,
+            num_kv_heads=self.config["num_key_value_heads"],
         )
         return
     

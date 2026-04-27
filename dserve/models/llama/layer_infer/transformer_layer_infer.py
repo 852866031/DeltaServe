@@ -93,8 +93,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             mem_manager.pin_pages(infer_state.prefill_mem_index_cat)
             key_mem_index = mem_manager.to_gpu_index(infer_state.prefill_mem_index_key)
             value_mem_index = mem_manager.to_gpu_index(infer_state.prefill_mem_index_value)
-            destindex_copy_kv(cache_k, key_mem_index, mem_manager.gpu_pools[self.layer_num_])
-            destindex_copy_kv(cache_v, value_mem_index, mem_manager.gpu_pools[self.layer_num_])
+            destindex_copy_kv(cache_k, key_mem_index, mem_manager.get_kv_pool(self.layer_num_))
+            destindex_copy_kv(cache_v, value_mem_index, mem_manager.get_kv_pool(self.layer_num_))
             mem_manager.unpin_pages(infer_state.prefill_mem_index_cat)
             return
         else:
@@ -104,8 +104,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 mem_manager.pin_pages(infer_state.decode_mem_index_key)
                 key_mem_index = mem_manager.to_gpu_index(infer_state.decode_mem_index_key)
                 value_mem_index = mem_manager.to_gpu_index(infer_state.decode_mem_index_value)
-                destindex_copy_kv(cache_k, key_mem_index, mem_manager.gpu_pools[self.layer_num_])
-                destindex_copy_kv(cache_v, value_mem_index, mem_manager.gpu_pools[self.layer_num_])
+                destindex_copy_kv(cache_k, key_mem_index, mem_manager.get_kv_pool(self.layer_num_))
+                destindex_copy_kv(cache_v, value_mem_index, mem_manager.get_kv_pool(self.layer_num_))
                 return
         return
     

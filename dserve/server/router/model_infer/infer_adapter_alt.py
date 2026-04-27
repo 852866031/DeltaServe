@@ -278,7 +278,7 @@ class InferAdapterAlt:
         if self.gpu_a_loc_lora_a is None or self.gpu_a_loc_lora_b is None:
             self.gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
             self.gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
-        return self.mem_manager.gpu_pools[layer_id], self.a_start_lora, self.a_len_lora, self.gpu_a_loc_lora_a, self.gpu_a_loc_lora_b, self.a_scaling
+        return self.mem_manager.get_adapter_pool(layer_id), self.a_start_lora, self.a_len_lora, self.gpu_a_loc_lora_a, self.gpu_a_loc_lora_b, self.a_scaling
 
    
 import triton
