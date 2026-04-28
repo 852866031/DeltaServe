@@ -83,6 +83,12 @@ class CudaGraphSection:
     use_graphed_bwd_attention: bool = True
     attn_bn_max: int = 8
     attn_l_max: int = 64
+    # Upper bound on the offline prefill profiling sweep. Each unique
+    # ceil(total/128)*128 bucket below this gets a captured prefill graph.
+    # Lower this when GPU memory is tight; runtime batches above the cap
+    # lazily capture on first hit (one-time latency spike). null = use
+    # INF_CAP from the generator (i.e. batch_max_tokens / 2 of max_total).
+    prefill_sweep_max_tokens: Optional[int] = None
 
 
 @dataclass

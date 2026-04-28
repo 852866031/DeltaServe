@@ -297,7 +297,7 @@ class PrefillExecutionEstimator:
         pred = p.alpha * S + p.beta * Tin + p.c
 
         if self.fit_rmse:
-            pred *= 1 + 2 * self.fit_rmse
+            pred *= 1 + 1.5 * self.fit_rmse
         return float(pred)
 
     def predict_coserving(
@@ -331,7 +331,7 @@ class PrefillExecutionEstimator:
 
         pred = p.alpha * S + p.beta * Tin + p.gamma * Tft + p.c
         if self.fit_rmse:
-            pred *= 1 + 2 * self.fit_rmse
+            pred *= 1 + 1.5 * self.fit_rmse
         return float(pred)
 
     # ======================================================================

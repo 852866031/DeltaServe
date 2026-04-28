@@ -3,6 +3,7 @@ from functools import partial
 from dserve.server.router.profile_req_queue import Profile_ReqQueue
 from dserve.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
 from dserve.server.router.profiling_batch_generator import ProfilingBatchGenerator
+from tqdm import tqdm
 import uvloop
 import asyncio
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -130,7 +131,16 @@ class RouterManager:
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.req_queue = get_scheduler(input_params, adapter_dirs)
-        self.profiling_batch_generator = ProfilingBatchGenerator(input_params.finetuning_params, adapter_dirs[0])
+        self.profiling_batch_generator = ProfilingBatchGenerator(
+            input_params.finetuning_params,
+            adapter_dirs[0],
+            batch_max_tokens=input_params.batch_max_tokens,
+            max_finetuning_tokens=input_params.cfg.memory.max_finetuning_tokens,
+            max_saved_finetuning_tokens=input_params.finetuning_params.max_saved_finetuning_tokens,
+            max_total_token_num=input_params.max_total_token_num,
+            max_req_total_len=input_params.max_req_total_len,
+            unified_mem_manager_max_size_gb=input_params.cfg.memory.unified_mem_manager_max_size_gb,
+        )
         self.profiling_batch_generator.prepare()
         self.prefill_estimator = PrefillExecutionEstimator()
         self.decode_estimator = DecodeExecutionEstimator()
@@ -386,7 +396,7 @@ class RouterManager:
         num_inf_tokens = sum(inference_tokens_list)
         c1 = num_inf_tokens < 200 and len(finetuning_tokens_list) !=0
         c2 = num_inf_tokens > 1000 
-        c3 = self.decode_step_count > 25
+        c3 = self.decode_step_count > 40
         if c1 or c2 or c3:
             if self.pause_printing:
                 if c1:
@@ -607,14 +617,30 @@ class RouterManager:
         if not self._check_if_finetuning_scheduler():
             return
         print("Start modeling prefill/decode time")
+        warmup_batches = self.profiling_batch_generator.warmup_batches
         inf_batches = self.profiling_batch_generator.inference_batches
         co_batches = self.profiling_batch_generator.coserving_batches
-        # Run inference-only batches
-        for idx, batch in enumerate(inf_batches):
+
+        total_steps = len(warmup_batches) + len(inf_batches) + len(co_batches)
+        pbar = tqdm(total=total_steps, desc="Profiling", unit="batch", mininterval=0.5)
+
+        # Warmup — runs but does NOT record stats. Replaces the old
+        # drop_batch_stats(0)+drop_batch_stats(1) hack.
+        pbar.set_postfix_str("warmup", refresh=False)
+        for batch in warmup_batches:
+            has_ft = any(r.is_finetuning for r in batch.reqs)
+            await self.isolated_prefill(batch)
+            if has_ft:
+                [self.model_rpcs[tp_rank].reset_activation_pool() for tp_rank in range(self.world_size)]
+            else:
+                await self.isolated_decode(batch)
+            pbar.update(1)
+
+        # Inference-only batches → prefill + 1 decode step (both recorded)
+        pbar.set_postfix_str("inference", refresh=False)
+        for batch in inf_batches:
             inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
-            print(f"Running inference-only batch {idx+1}/{len(inf_batches)}, inference tokens: {sum(inference_tokens_list)}, finetuning tokens: {sum(finetuning_tokens_list)}")
             prefill_time = await self.isolated_prefill(batch)
-            # Log inference-only PREFILL
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
                 finetuning_tokens=finetuning_tokens_list,
@@ -629,10 +655,12 @@ class RouterManager:
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=decode_time,
             )
-        # Run co-serving batches
-        for idx, batch in enumerate(co_batches):
+            pbar.update(1)
+
+        # Coserving batches → prefill only (recorded), then activation reset
+        pbar.set_postfix_str("coserve", refresh=False)
+        for batch in co_batches:
             inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
-            print(f"Running co-serving batch {idx+1}/{len(co_batches)}, inference tokens: {sum(inference_tokens_list)}, finetuning tokens: {sum(finetuning_tokens_list)}")
             prefill_time = await self.isolated_prefill(batch)
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
@@ -640,15 +668,31 @@ class RouterManager:
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=prefill_time,
             )
-            # Reset activations
             [self.model_rpcs[tp_rank].reset_activation_pool() for tp_rank in range(self.world_size)]
-        self.batch_exec_tracker.drop_batch_stats(0)
-        self.batch_exec_tracker.drop_batch_stats(1)
-        #self.batch_exec_tracker.print_batch_stats()
+            pbar.update(1)
+
+        pbar.close()
+
         self.prefill_estimator.data_fit(self.batch_exec_tracker)
         self.decode_estimator.data_fit(self.batch_exec_tracker)
         print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
         print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
+
+        # Final CUDA-graph memory summary, once, right before online serving begins.
+        try:
+            stats = self.model_rpcs[0].get_graph_mem_stats()
+            if stats:
+                parts = [
+                    f"{kind}: {n} graphs, {b / (1024 * 1024):.1f} MB"
+                    for kind, (b, n) in stats.items()
+                ]
+                total_bytes = sum(b for b, _ in stats.values())
+                print(
+                    f"\033[34m[CudaGraph] post-profiling totals — {' | '.join(parts)} "
+                    f"=> {total_bytes / (1024 * 1024):.1f} MB across all graphs\033[0m"
+                )
+        except Exception as e:
+            print(f"\033[34m[CudaGraph] could not read post-profiling totals: {e}\033[0m")
 
 def start_router_process(args, router_port, detokenization_port, model_rpc_ports, mode, pipe_writer):
     cfg = args.cfg

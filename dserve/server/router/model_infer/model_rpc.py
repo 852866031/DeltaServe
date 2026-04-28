@@ -359,6 +359,18 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_resume_backward(self):
         self.bwd_pause_event.set()
+
+    def exposed_get_graph_mem_stats(self):
+        """Return total CUDA-graph memory captured so far on the shared
+        runners owned by LoraUnorderedBatchMixed. Returned as a dict of
+        {kind: (bytes, num_graphs)} for printing on the manager side."""
+        from dserve.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
+        stats = {}
+        r = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+        if r is not None:
+            stats["decode"] = (r.total_decode_graph_bytes(), r.num_decode_graphs())
+            stats["prefill"] = (r.total_prefill_graph_bytes(), r.num_prefill_graphs())
+        return stats
     
     def compare_lora_drift_per_layer(self):
         """
@@ -427,6 +439,7 @@ class ModelRpcClient:
             self._filter_batch = async_wrap(self.model.filter_batch)
             self._merge_batch = async_wrap(self.model.merge_batch)
             self._remove_batch = async_wrap(self.model.remove_batch)
+            self._get_graph_mem_stats = self.model.get_graph_mem_stats
         else:
             self._init_model = self.model.exposed_init_model
             self._load_adapters = self.model.exposed_load_adapters
@@ -443,6 +456,7 @@ class ModelRpcClient:
             self._filter_batch = self.model.exposed_filter_batch
             self._merge_batch = self.model.exposed_merge_batch
             self._remove_batch = self.model.exposed_remove_batch
+            self._get_graph_mem_stats = self.model.exposed_get_graph_mem_stats
         return
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
@@ -518,6 +532,13 @@ class ModelRpcClient:
     def reset_activation_pool(self):
         self.model.model.mem_manager.reset_activation_pool()
         return
+
+    def get_graph_mem_stats(self):
+        """Synchronous accessor — returns dict {kind: (bytes, num_graphs)}."""
+        if self.use_rpc:
+            from rpyc.utils.classic import obtain
+            return obtain(self._get_graph_mem_stats())
+        return self._get_graph_mem_stats()
 
     async def decode_batch(self, batch_id, decode_count=-1):
         ans = self._decode_batch(batch_id, decode_count=decode_count)

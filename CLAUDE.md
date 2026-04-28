@@ -92,13 +92,19 @@ with a helpful error.
 
 ### Launchers (`eval/{llama,llama3}/launch_*.py`)
 
-User-facing launchers expose ~6 flags (`--enable-finetuning`,
-`--enable-cuda-graph`, `--enable-bwd-cuda-graph`, `--port`, `--rank_id`,
-`--ft_log_path`) and translate them into `--config <yaml> --override ...`
-arguments to `api_server.py`. The launcher also resolves relative
-`lora.adapter_dirs` entries to absolute paths so they match what the benchmark
-client sends as `lora_dir` (the server stores the dir string verbatim in
-`lora_ranks` — mismatched keys raise `KeyError` in
+User-facing launchers expose a handful of flags (`--enable-finetuning`,
+`--enable-cuda-graph`, `--enable-prefill-cuda-graph`,
+`--enable-bwd-cuda-graph`, `--packed-kv`, `--occupancy_log <path>`,
+`--port`, `--rank_id`, `--ft_log_path`) and translate them into
+`--config <yaml> --override ...` arguments to `api_server.py`. The
+`--packed-kv` flag swaps the YAML to
+`serving_config_finetuning_packed.yaml` (only meaningful with
+`--enable-finetuning`); `--occupancy_log` becomes a
+`memory.unified_mem_manager_log_path=...` override and activates the
+allocator's CSV tracker. The launcher also resolves relative
+`lora.adapter_dirs` entries to absolute paths so they match what the
+benchmark client sends as `lora_dir` (the server stores the dir string
+verbatim in `lora_ranks` — mismatched keys raise `KeyError` in
 `mixed_req_queue._can_add_new_req`).
 
 ## Backward pass: what is and isn't graph-captured
@@ -165,6 +171,89 @@ throughput. Use `eval/llama3/analyze_finetuning_data.py` and
   input-id buffers. Do not confuse it with
   `cfg.finetune.max_saved_finetuning_tokens`, which is the per-backward token
   budget and the FFN graph capture size.
+- **External callers MUST go through pool accessors**, not
+  `mem_manager.gpu_pools[layer]` directly. The accessors are
+  `get_kv_pool(layer)`, `get_adapter_pool(layer)`, `get_activation_pool(layer)`
+  on `UnifiedMemoryAllocator`. Subclasses (e.g. `PackedKVMemoryAllocator`)
+  return a different view from `get_kv_pool` while keeping the others on the
+  original layout, so the call site stays oblivious to which allocator is in
+  use. A grep for `mem_manager.gpu_pools[` in `dserve/` should return zero
+  hits — keep it that way.
+- **KV freers MUST call `free_kv(sub_ids)`**, not `free(page_ids)`. The base
+  allocator aliases `free_kv → free` so this works uniformly. The packed
+  allocator implements sub-slot semantics in `free_kv`. Mis-routing KV ids
+  through `free()` corrupts the bitmap silently because sub-slot ids in
+  `[0, tot_size)` collide with page ids and cannot be disambiguated by range.
+  The three KV freers in `infer_batch.py` (`free_self`, the two filter paths)
+  already use `free_kv`; preserve that.
+
+## Memory allocator selection (`unified` vs `packed_kv`)
+
+Selected at startup via `cfg.memory.allocator` and dispatched through
+`dserve/common/allocator_factory.py`. Both implementations share the bitmap +
+`free_bitmap` + `page_type_map` machinery from
+`dserve/common/unified_mem_allocator.py`.
+
+- **`unified`** (default): one page = one KV slot. For Llama-3 GQA each page
+  holds `[num_attention_heads=32, head_dim=128]` but only the first 8 head
+  rows carry K (or V) data — the other 24 rows are zero padding. Simple, but
+  the KV portion of the pool is ~4× oversized for GQA.
+- **`packed_kv`** (`dserve/common/packed_kv_mem_allocator.py`): subclass of
+  `UnifiedMemoryAllocator` that packs `F = num_attention_heads /
+  num_key_value_heads` (= 4 for Llama-3) KV sub-slots into each page. The
+  trick is a zero-copy reshape view exposed only to KV-reading kernels:
+
+  ```
+  gpu_pools[l]      shape [tot_size, 32, 128]   — adapter / activation kernels
+  gpu_pools_kv[l]   shape [tot_size * F, 8, 128] — KV kernels (same memory)
+  ```
+
+  KV kernel call sites all do `pool[idx, :kv_heads, :]`; on the reshape view
+  the middle dim is already `kv_heads`, so the slice is identity and the
+  kernel binary doesn't notice. Zero kernel edits.
+
+- **Allocation strategy in `packed_kv`** is *whole-page-per-call* — no
+  partial-page draining: `_alloc_kv(n)` calls `super().alloc(ceil(n/F),
+  KV_CACHE)` and derives sub-slot ids arithmetically. `alloc_contiguous_kv`
+  similarly delegates to the parent with a smaller page count. Each page's
+  `kv_refcount` (int64, set on alloc) tracks how many sub-slots the caller
+  holds; `free_kv` decrements via `torch.bincount(page_ids,
+  minlength=tot_size)` and a global-mask reconcile, page returns to FREE on
+  refcount=0. Trade-off: a partial last page's unused sub-slots are
+  "wasted" until the page fully drains — fine for low-occupancy workloads,
+  worth re-evaluating if pool occupancy ever climbs past ~50%.
+
+- **`free_kv` is the bottleneck-shaped op**. Use `bincount` (1 sync) rather
+  than `torch.unique` + boolean indexing (2 syncs). A "global-mask" rewrite
+  scanning the whole `kv_sub_mask` was tried and was slower under MPS
+  contention because the larger kernel time on the inference stream stalled
+  the backward subprocess — the per-call sync cost is less important than
+  GPU stream contention with the backward graphs. Keep this in mind before
+  optimizing.
+
+- **F=1 fast paths exist in every override** (`_alloc_kv`,
+  `alloc_contiguous_kv`, `free_kv`). For Llama-1 MHA the subclass is
+  byte-for-byte identical to the parent; any divergence with `packed_kv` on
+  Llama-1 is a pure subclass bug. That's the regression-test canary.
+
+- **CPU-side `_used_pages` counter**, maintained on every alloc/free path in
+  both allocators. Source of truth for the occupancy tracker (see below) and
+  for any allocator query that wants `used_pages` without a GPU sync.
+
+- **Occupancy tracker** (`_OccupancyTracker` in `unified_mem_allocator.py`)
+  is a daemon thread that samples `(used_pages, tot_size, occupancy_pct)`
+  to a CSV at `cfg.memory.unified_mem_manager_log_path`. Reads
+  `self._used_pages` only — **CPU-only**, never `free_bitmap.sum()`. GPU
+  work in a background thread can interfere with CUDA-graph capture/replay
+  on the inference thread (caching-allocator pool aliasing), causing silent
+  NaN logits later. Don't add GPU ops to the tracker.
+
+- The allocator's `log_path` plumbing flows from
+  `cfg.memory.unified_mem_manager_log_path` through `manager.py:673` →
+  `model_rpc` → model `_init_mem_manager` → `make_allocator(...)`. Setting
+  the YAML field activates the tracker; leaving it `null` keeps the daemon
+  thread uncreated and the counter overhead negligible (one Python int
+  add/sub per alloc/free under the existing `page_table_lock`).
 
 ## Precision rule for llama3 attention
 
@@ -202,15 +291,47 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
   per-request timings and periodic finetuning-token counters. Calls
   `launch_llama3.py` itself if you pass `--co`. Sends adapter as an absolute
   path; the launcher must resolve `lora.adapter_dirs` to match.
+  Output filenames are tagged by which knobs are on — order:
+  `_decode_prefill_bwd_<tight|loose>_kv` — so the comparison plots find the
+  right pair of CSVs. Flags:
+  - `--decode_graph` / `--prefill_graph` / `--bwd_graph` — append
+    `_decode` / `_prefill` / `_bwd` to the suffix and pass corresponding
+    overrides to the launcher.
+  - `--packed_kv` — append `_kv` to the suffix; passes `--packed-kv` to the
+    launcher.
+  - `--track_occupancy` — write `output/occupancy<suffix>.csv` (1 Hz
+    sampling); passes `--occupancy_log` to the launcher.
+  - `--tight` / `--loose` — pick `timeline_tight.csv` or
+    `timeline_loose.csv` instead of the default `timeline_live.csv`;
+    appends `_tight` / `_loose` to the suffix. Mutually exclusive.
 - `bwd_graph_plot.py` — compares two CSV runs (eager vs. graphed) on a 1×3
   layout: TTFT CDF, E2E latency over time (with avg annotation), cumulative
   finetuning tokens (with tok/s). Uses `drop_duplicates(subset="timestamp",
   keep="last")` so the cumulative line can't backtrack.
+- `compare_graphs_plot.py` — graph-ablation comparison plots, four-panel
+  layout (request timeline + the three from `bwd_graph_plot`).
+- `compare_kv_plot.py` — `unified` vs `packed_kv` comparison. Takes
+  `--suffix _decode_prefill_bwd_tight` etc.; looks up `<suffix>` (unified)
+  and `<suffix>_kv` (packed) under `output/`.
+- `compare_occupancy_plot.py` — `(used_pages / total_pages)` over time,
+  unified vs packed_kv, drives off the `occupancy<suffix>.csv` files
+  emitted by `--track_occupancy`. Two-panel: occupancy % left, used pages
+  right.
+- `compare_allocators.py` — sequential, end-to-end correctness check.
+  Spawns the server twice (once per YAML), sends N greedy prompts, diffs
+  generated text + token counts. Use to verify `packed_kv` produces the
+  same outputs as `unified` after any allocator change.
 - `analyze_finetuning_data.py` — tokenizes a dataset, prints percentiles +
   histogram + worst-case greedy-packed distinct-sample count; recommends
   `attn_bn_max` / `attn_l_max` and estimates padding blowup.
 - `keep_p95.py` — drops the top 5% longest samples (configurable) so you can
   tighten `attn_l_max` without ever hitting the monolithic fallback.
+
+`MEMORY_ANALYSIS.md` (project root) walks through where every GB of GPU
+residency goes for the `--co --decode_graph --prefill_graph --bwd_graph`
+workload, identifies the wastes (GQA KV oversizing, activation
+double-buffer), and quantifies the right pool sizing for a given
+throughput. Read it first if you're investigating memory.
 
 ## Important knobs (all in YAML)
 
@@ -223,6 +344,8 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
 | FFN graph size / token budget | `finetune.max_saved_finetuning_tokens` | The single fixed FFN graph shape |
 | Allocator buffer size | `memory.max_finetuning_tokens` | Shared activation/logit buffers |
 | Unified mem pool | `memory.unified_mem_manager_max_size_gb` | KV+activation pool capacity |
+| Allocator implementation | `memory.allocator` | `"unified"` (default, page=1 KV slot) or `"packed_kv"` (page=F KV sub-slots, GQA-packed) |
+| Occupancy tracker | `memory.unified_mem_manager_log_path` | If non-null, allocator daemon writes 1 Hz CSV of (used_pages, occupancy_pct). CPU-only, safe under graph capture. |
 | SLOs | `slo.{ttft_slo, avg_tbt_slo, max_tbt_slo}` | Scheduler trade-off thresholds |
 | Scheduler | `scheduler.name` | Currently always `"dserve"` |
 
@@ -245,3 +368,8 @@ Good first reads, in order:
    (`_backpop_attention`, `_backpop_attention_padded*`).
 7. `dserve/models/llama/SFT_service_graph.py` — graph runner and the
    capture/replay lifecycle, persistent-buffer rationale.
+8. `dserve/common/unified_mem_allocator.py` + `packed_kv_mem_allocator.py`
+   + `allocator_factory.py` — pool layout, accessors, the unified vs
+   packed_kv split, occupancy tracker.
+9. `MEMORY_ANALYSIS.md` (project root) — what consumes GPU memory and
+   why; read before any memory-side work.
