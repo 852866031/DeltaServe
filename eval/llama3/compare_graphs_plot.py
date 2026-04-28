@@ -24,6 +24,7 @@ Run the upstream benchmarks first, e.g.:
 import argparse
 import os
 import sys
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -134,6 +135,20 @@ def _make_figure(base_results, base_log, var_results, var_log,
     plt.close(fig)
 
 
+def _prefer_kv(output_dir: str, stem: str, suffix: str) -> Optional[str]:
+    """Return the packed-kv variant path if it exists, else the plain one,
+    else None. `auto_benchmark.py` appends `_kv` to the suffix when run with
+    `--packed_kv`, so the packed-kv file is `<stem><suffix>_kv.csv`.
+    """
+    kv_path = os.path.join(output_dir, f"{stem}{suffix}_kv.csv")
+    plain_path = os.path.join(output_dir, f"{stem}{suffix}.csv")
+    if os.path.exists(kv_path):
+        return kv_path
+    if os.path.exists(plain_path):
+        return plain_path
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -154,27 +169,28 @@ def main():
         sys.exit(f"[compare_graphs_plot] timeline CSV missing: {e}")
     timeline_df = load_timeline(args.timeline_csv)
 
-    base_results_csv = os.path.join(args.output_dir, "timeline_results.csv")
-    base_log_csv = os.path.join(args.output_dir, "bwd_log.csv")
-    try:
-        ensure_exists(base_results_csv)
-        ensure_exists(base_log_csv)
-    except FileNotFoundError as e:
-        sys.exit(f"[compare_graphs_plot] baseline CSV missing: {e}")
+    base_results_csv = _prefer_kv(args.output_dir, "timeline_results", "")
+    base_log_csv = _prefer_kv(args.output_dir, "bwd_log", "")
+    if base_results_csv is None or base_log_csv is None:
+        sys.exit("[compare_graphs_plot] baseline CSV missing "
+                 "(looked for timeline_results[_kv].csv and bwd_log[_kv].csv)")
+    print(f"[compare_graphs_plot] baseline: {os.path.basename(base_results_csv)}, "
+          f"{os.path.basename(base_log_csv)}")
 
     base_results = load_results(base_results_csv)
     base_log = parse_bwd_log_csv(base_log_csv)
 
     wrote = 0
     for png_stem, variant_label, suffix in COMPARISONS:
-        var_results_csv = os.path.join(args.output_dir, f"timeline_results{suffix}.csv")
-        var_log_csv = os.path.join(args.output_dir, f"bwd_log{suffix}.csv")
-        missing = [p for p in (var_results_csv, var_log_csv) if not os.path.exists(p)]
-        if missing:
-            print(f"[compare_graphs_plot] skip {png_stem}: missing {missing}",
-                  file=sys.stderr)
+        var_results_csv = _prefer_kv(args.output_dir, "timeline_results", suffix)
+        var_log_csv = _prefer_kv(args.output_dir, "bwd_log", suffix)
+        if var_results_csv is None or var_log_csv is None:
+            print(f"[compare_graphs_plot] skip {png_stem}: no CSVs for "
+                  f"suffix '{suffix}' (with or without _kv)", file=sys.stderr)
             continue
 
+        print(f"[compare_graphs_plot] {png_stem}: {os.path.basename(var_results_csv)}, "
+              f"{os.path.basename(var_log_csv)}")
         var_results = load_results(var_results_csv)
         var_log = parse_bwd_log_csv(var_log_csv)
         out_path = os.path.join(args.plots_dir, f"{png_stem}.png")

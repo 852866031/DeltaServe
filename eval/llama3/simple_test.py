@@ -234,28 +234,55 @@ async def main() -> None:
     stop_event = asyncio.Event()
 
     try:
-        # Start server in its own process group so we can signal the whole group
+        # Start server in its own process group so we can signal the whole group.
+        # Read raw bytes (no text=True) so '\r' from tqdm progress bars is
+        # preserved instead of being silently rewritten to '\n' by Python's
+        # universal-newline translation.
         if os.name == "posix":
             p = subprocess.Popen(
                 cmd,
                 preexec_fn=os.setsid,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,  # line-buffer in parent reader
                 env=env,
             )
 
-        # Stream logs in the background
+        # Stream logs in the background. Splits on '\n' (finalize line) and
+        # '\r' (in-place redraw) so tqdm bars in the child render as a single
+        # updating line.
         async def pump_logs() -> None:
             assert p is not None
             assert p.stdout is not None
             loop = asyncio.get_running_loop()
+            stream = p.stdout
+            buf = []
+            redrawing = False
+
+            def read_chunk() -> bytes:
+                return stream.read(256)
+
             while True:
-                line = await loop.run_in_executor(None, p.stdout.readline)
-                if not line:
+                raw = await loop.run_in_executor(None, read_chunk)
+                if not raw:
+                    if buf:
+                        sys.stdout.write(("\r" if redrawing else "") + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
                     break
-                print("[server]", line.rstrip(), flush=True)
+                chunk = raw.decode("utf-8", errors="replace")
+                for ch in chunk:
+                    if ch == "\n":
+                        prefix = "\r" if redrawing else ""
+                        sys.stdout.write(prefix + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
+                        buf.clear()
+                        redrawing = False
+                    elif ch == "\r":
+                        sys.stdout.write("\r[server] " + "".join(buf))
+                        sys.stdout.flush()
+                        buf.clear()
+                        redrawing = True
+                    else:
+                        buf.append(ch)
 
         log_task = asyncio.create_task(pump_logs())
 

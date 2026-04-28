@@ -381,6 +381,8 @@ async def main() -> None:
 
     # minimal required args
     ap.add_argument("--timeline_csv", default=str(SCRIPT_DIR / "timeline_live.csv"))
+    ap.add_argument("--loose", default=False, action="store_true")
+    ap.add_argument("--tight", default=False, action="store_true")
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
     ap.add_argument("--lora_dir", default=str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"))
 
@@ -410,6 +412,13 @@ async def main() -> None:
 
     args = ap.parse_args()
 
+    if args.tight and args.loose:
+        ap.error("--tight and --loose are mutually exclusive")
+    if args.loose:
+        args.timeline_csv = str(SCRIPT_DIR / "timeline_loose.csv")
+    elif args.tight:
+        args.timeline_csv = str(SCRIPT_DIR / "timeline_tight.csv")
+
     timeline_rows = load_timeline_csv(args.timeline_csv)
     print(f"[orchestrator] Loaded {len(timeline_rows)} rows from {args.timeline_csv}", flush=True)
     if timeline_rows:
@@ -433,8 +442,16 @@ async def main() -> None:
         tags.append("prefill")
     if args.bwd_graph:
         tags.append("bwd")
+    # Workload-shape tag goes BEFORE the allocator tag so the unified-vs-
+    # packed_kv comparison plots (which look up `<suffix>` and `<suffix>_kv`)
+    # find both files for the same workload shape.
     if args.packed_kv:
         tags.append("kv")
+    if args.tight:
+        tags.append("tight")
+    elif args.loose:
+        tags.append("loose")
+   
     suffix = ("_" + "_".join(tags)) if tags else ""
 
     def _tagged(filename: str, prefer_arg_path: bool = False) -> str:
@@ -491,25 +508,57 @@ async def main() -> None:
     stop_event = asyncio.Event()
 
     try:
-        # POSIX/Linux only
+        # POSIX/Linux only.
+        # Read raw bytes (no text=True) so '\r' from tqdm progress bars is
+        # preserved instead of being silently rewritten to '\n' by Python's
+        # universal-newline translation. The pumper decodes manually and
+        # splits on '\r' (redraw) and '\n' (finalize) separately.
         p = subprocess.Popen(
             cmd,
             preexec_fn=os.setsid,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
             env=env,
         )
 
         async def pump_logs() -> None:
+            """
+            Forward child output to our stdout, prefixing each logical line
+            with '[server]'. Splits on either '\\n' (terminate line) or
+            '\\r' (in-place redraw), so tqdm progress bars from the child
+            render as a single updating line on our terminal.
+            """
             assert p is not None and p.stdout is not None
             loop = asyncio.get_running_loop()
+            stream = p.stdout
+            buf = []
+            redrawing = False  # last emitted output was a CR-update (no newline yet)
+
+            def read_chunk() -> bytes:
+                return stream.read(256)
+
             while True:
-                line = await loop.run_in_executor(None, p.stdout.readline)
-                if not line:
+                raw = await loop.run_in_executor(None, read_chunk)
+                if not raw:
+                    if buf:
+                        sys.stdout.write(("\r" if redrawing else "") + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
                     break
-                print("[server]", line.rstrip(), flush=True)
+                chunk = raw.decode("utf-8", errors="replace")
+                for ch in chunk:
+                    if ch == "\n":
+                        prefix = "\r" if redrawing else ""
+                        sys.stdout.write(prefix + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
+                        buf.clear()
+                        redrawing = False
+                    elif ch == "\r":
+                        sys.stdout.write("\r[server] " + "".join(buf))
+                        sys.stdout.flush()
+                        buf.clear()
+                        redrawing = True
+                    else:
+                        buf.append(ch)
 
         log_task = asyncio.create_task(pump_logs())
 

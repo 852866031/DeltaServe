@@ -115,8 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for decode steps")
     parser.add_argument("--enable-prefill-cuda-graph", action="store_true",
-                        help="Enable CUDA graph capture for prefill "
-                             "(batch_size=1 full-graph or DSERVE_PIECEWISE_PREFILL=1 piecewise)")
+                        help="Enable CUDA graph capture for prefill")
     parser.add_argument("--enable-bwd-cuda-graph", action="store_true",
                         help="Enable CUDA graph capture for backward steps")
     parser.add_argument("--packed-kv", action="store_true",

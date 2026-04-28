@@ -37,7 +37,7 @@ scheduler:
 
 memory:
   enable_unified_mem_manager: true
-  unified_mem_manager_max_size_gb: 6
+  unified_mem_manager_max_size_gb: 4
   max_finetuning_tokens: 1024
   unified_mem_manager_log_path: null
 

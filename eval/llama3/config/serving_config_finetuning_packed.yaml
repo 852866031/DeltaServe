@@ -37,7 +37,7 @@ scheduler:
 
 memory:
   enable_unified_mem_manager: true
-  unified_mem_manager_max_size_gb: 6
+  unified_mem_manager_max_size_gb: 3
   max_finetuning_tokens: 256
   unified_mem_manager_log_path: null
   allocator: packed_kv
@@ -68,7 +68,7 @@ finetune:
 # Looser TTFT SLO under finetune load — co-serving is allowed to trade
 # inference latency for backward throughput.
 slo:
-  ttft_slo: 0.35
+  ttft_slo: 0.25
   avg_tbt_slo: 0.15
   max_tbt_slo: 0.35
 
