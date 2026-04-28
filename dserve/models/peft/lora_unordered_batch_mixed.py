@@ -186,7 +186,7 @@ class LoraUnorderedBatchMixed:
         use_prefill_cg = (
             not use_piecewise
             and self.enable_cuda_graph
-            and batch_size == 1
+            and batch_size <= 64  # bs_bucket support: {1, 2, 4, 8, 16, 32, 64}
             and (finetune_mask is None or not bool(torch.any(finetune_mask)))
             and ref_mask is None
             and prefill_interrupt_event is None
@@ -389,12 +389,14 @@ class LoraUnorderedBatchMixed:
                 batch_size, total_token_num, input_ids, infer_state, real_batch_req_bins, forward_kwargs)
 
         if runner.has_prefill_graph(batch_size, total_token_num):
-            return runner.prefill_replay(
+            logits = runner.prefill_replay(
                 self, batch_size, total_token_num, input_ids, infer_state, real_batch_req_bins)
         else:
-            return runner.prefill_capture(
+            logits = runner.prefill_capture(
                 self, batch_size, total_token_num, self._context_forward,
                 input_ids, infer_state, real_batch_req_bins, forward_kwargs)
+        # logits are bs_bucket-sized; slice to real batch_size.
+        return logits[:batch_size]
 
     def _prefill_padded_no_graph(self, batch_size, total_token_num, input_ids,
                                   infer_state, real_batch_req_bins, forward_kwargs):

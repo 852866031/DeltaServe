@@ -79,7 +79,8 @@ class CudaGraphRunner:
         return ((total_token_num + bs - 1) // bs) * bs
 
     def get_prefill_cache_key(self, batch_size: int, total_token_num: int) -> Tuple[int, int]:
-        return (batch_size, self.get_prefill_token_bucket(total_token_num))
+        return (self.get_prefill_bs_bucket(batch_size),
+                self.get_prefill_token_bucket(total_token_num))
 
     def has_prefill_graph(self, batch_size: int, total_token_num: int) -> bool:
         return self.get_prefill_cache_key(batch_size, total_token_num) in self._prefill_cache
@@ -260,30 +261,38 @@ class CudaGraphRunner:
         graph.replay()
         return static_output
 
+    # ─── Prefill bucketing for batch_size ───────────────────────────────
+    PREFILL_BS_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+
+    @staticmethod
+    def get_prefill_bs_bucket(batch_size: int) -> int:
+        for b in CudaGraphRunner.PREFILL_BS_BUCKETS:
+            if batch_size <= b:
+                return b
+        return batch_size
+
     # ─── Prefill capture / replay ───────────────────────────────────────
     #
-    # MVP scope: batch_size == 1, inference-only (no finetune), non-int8 KV.
-    # Cache key: (batch_size, total_token_num_bucket).
+    # Scope: inference-only (no finetune), non-int8 KV.
+    # Cache key: (bs_bucket, total_token_num_bucket).
     #
-    # The prefill graph captures the full _context_forward path including
-    # pre_infer.context_forward and a graph-friendly post_infer output path.
-    # Dynamic-length tensors are padded to T_bucket; attention reads only
-    # the first L_real tokens via b_start_loc/b_seq_len, so padding is inert
-    # for attention output. Padding K/V slots get written to but never read.
+    # Captures the full _context_forward (incl. attention) so attention's
+    # max_input_len, b_start_loc, b_seq_len are baked into the captured
+    # kernels.  The captured graph runs as if there were bs_bucket requests:
+    # padded requests get b_seq_len=0 (attention skips them) and write K/V
+    # into dedicated scratch slots that are never read.
     def prefill_capture(self, engine, batch_size, total_token_num, context_forward_fn,
                         input_ids, infer_state, batch_req_bins, forward_kwargs) -> torch.Tensor:
         """Capture a CUDA graph for prefill.
 
-        `engine` is the LoraUnorderedBatchMixed instance — we update engine.batch_req_bins
-        and engine.delta to point at static padded buffers so the captured kernels
-        reference stable addresses.
-        `batch_req_bins` is the real (unpadded) [total_token_num] index tensor.
+        Supports batch_size in {1, 2, 4, 8} via padding to bs_bucket. Padded
+        requests have b_seq_len=0, so attention is a no-op for them.
         """
-        assert batch_size == 1, "prefill CUDA graph MVP supports batch_size=1 only"
         infer_state.mem_manager.page_table_lock.acquire()
         try:
             T_bucket = self.get_prefill_token_bucket(total_token_num)
-            cache_key = (batch_size, T_bucket)
+            bs_bucket = self.get_prefill_bs_bucket(batch_size)
+            cache_key = (bs_bucket, T_bucket)
 
             # Swap in T_bucket-sized delta scratch buffers for LoRA (persistent across
             # capture/replay of the same bucket).
@@ -308,9 +317,16 @@ class CudaGraphRunner:
             static_position_cos[:total_token_num].copy_(pc)
             static_position_sin[:total_token_num].copy_(ps)
 
-            # b_start_loc / b_seq_len are small ([batch_size]) — no padding needed
-            static_b_start_loc = infer_state.b_start_loc.clone()
-            static_b_seq_len = infer_state.b_seq_len.clone()
+            # b_start_loc / b_seq_len padded to bs_bucket. Padded slots have
+            # b_seq_len=0 so attention treats them as zero-length requests.
+            # b_start_loc for padded slots is set to total_token_num (one past
+            # the last real token) so the kernel grid math is sane.
+            static_b_start_loc = torch.zeros(bs_bucket, dtype=infer_state.b_start_loc.dtype, device="cuda")
+            static_b_seq_len = torch.zeros(bs_bucket, dtype=infer_state.b_seq_len.dtype, device="cuda")
+            static_b_start_loc[:batch_size].copy_(infer_state.b_start_loc)
+            static_b_seq_len[:batch_size].copy_(infer_state.b_seq_len)
+            if batch_size < bs_bucket:
+                static_b_start_loc[batch_size:].fill_(int(total_token_num))
 
             # Pad batch_req_bins
             static_batch_req_bins = torch.zeros(T_bucket, dtype=batch_req_bins.dtype, device="cuda")
@@ -404,6 +420,7 @@ class CudaGraphRunner:
                        batch_req_bins) -> torch.Tensor:
         cache_key = self.get_prefill_cache_key(batch_size, total_token_num)
         graph, bufs, static_output, T_bucket = self._prefill_cache[cache_key]
+        bs_bucket = self.get_prefill_bs_bucket(batch_size)
 
         # Swap engine's delta to the persistent static buffers captured with this graph.
         engine.delta = bufs['delta']
@@ -416,8 +433,14 @@ class CudaGraphRunner:
         bufs['position_sin'][total_token_num:].zero_()
         bufs['position_sin'][:total_token_num].copy_(infer_state.position_sin)
 
-        bufs['b_start_loc'].copy_(infer_state.b_start_loc)
-        bufs['b_seq_len'].copy_(infer_state.b_seq_len)
+        # Pad b_start_loc / b_seq_len to bs_bucket — padded slots have seq_len=0
+        # so attention treats them as no-ops.
+        bufs['b_start_loc'].zero_()
+        bufs['b_seq_len'].zero_()
+        bufs['b_start_loc'][:batch_size].copy_(infer_state.b_start_loc)
+        bufs['b_seq_len'][:batch_size].copy_(infer_state.b_seq_len)
+        if batch_size < bs_bucket:
+            bufs['b_start_loc'][batch_size:].fill_(int(total_token_num))
 
         bufs['batch_req_bins'][total_token_num:].zero_()
         bufs['batch_req_bins'][:total_token_num].copy_(batch_req_bins)
