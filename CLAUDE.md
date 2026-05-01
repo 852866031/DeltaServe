@@ -52,11 +52,13 @@ is **no flag soup**: `api_server.py` exposes only four CLI args.
 ### Files
 
 ```
-dserve/server/config.py                            ← ServerConfig dataclass +
-                                                     YAML loader + override parser
-eval/llama3/config/serving_config_finetuning.yaml  ← llama3 SFT-enabled
+dserve/server/config.py                                    ← ServerConfig dataclass +
+                                                             YAML loader + override parser
+eval/llama3/config/serving_config_finetuning.yaml          ← llama3 SFT-enabled (emotion, unified)
+eval/llama3/config/serving_config_finetuning_packed.yaml   ← llama3 SFT-enabled (emotion, packed_kv)
+eval/llama3/config/serving_config_finetuning_alpaca.yaml   ← llama3 SFT-enabled (alpaca-1000, packed_kv)
 eval/llama3/config/serving_config_no_finetuning.yaml
-eval/llama/config/serving_config_finetuning.yaml   ← llama1 SFT-enabled
+eval/llama/config/serving_config_finetuning.yaml           ← llama1 SFT-enabled
 eval/llama/config/serving_config_no_finetuning.yaml
 ```
 
@@ -94,18 +96,23 @@ with a helpful error.
 
 User-facing launchers expose a handful of flags (`--enable-finetuning`,
 `--enable-cuda-graph`, `--enable-prefill-cuda-graph`,
-`--enable-bwd-cuda-graph`, `--packed-kv`, `--occupancy_log <path>`,
-`--port`, `--rank_id`, `--ft_log_path`) and translate them into
-`--config <yaml> --override ...` arguments to `api_server.py`. The
-`--packed-kv` flag swaps the YAML to
-`serving_config_finetuning_packed.yaml` (only meaningful with
-`--enable-finetuning`); `--occupancy_log` becomes a
+`--enable-bwd-cuda-graph`, `--packed-kv`, `--alpaca`,
+`--occupancy_log <path>`, `--port`, `--rank_id`, `--ft_log_path`) and
+translate them into `--config <yaml> --override ...` arguments to
+`api_server.py`. YAML selection precedence under `--enable-finetuning`:
+`--alpaca` → `serving_config_finetuning_alpaca.yaml` (alpaca-1000,
+packed_kv); else `--packed-kv` → `serving_config_finetuning_packed.yaml`
+(emotion, packed_kv); else `serving_config_finetuning.yaml` (emotion,
+unified). Without `--enable-finetuning`, both `--packed-kv` and
+`--alpaca` are warned-and-ignored. `--occupancy_log` becomes a
 `memory.unified_mem_manager_log_path=...` override and activates the
-allocator's CSV tracker. The launcher also resolves relative
-`lora.adapter_dirs` entries to absolute paths so they match what the
-benchmark client sends as `lora_dir` (the server stores the dir string
-verbatim in `lora_ranks` — mismatched keys raise `KeyError` in
-`mixed_req_queue._can_add_new_req`).
+allocator's CSV tracker. The launcher resolves relative `lora.adapter_dirs`
+entries to absolute paths so they match what the benchmark client sends as
+`lora_dir` (the server stores the dir string verbatim in `lora_ranks` —
+mismatched keys raise `KeyError` in `mixed_req_queue._can_add_new_req`).
+It also resolves `finetune.data_path` against `eval/llama3/data/` (not
+`config/`) — finetuning corpora and their prep scripts live under `data/`,
+config YAMLs under `config/`.
 
 ## Backward pass: what is and isn't graph-captured
 
@@ -382,27 +389,31 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
 - `dserve/models/llama3/SFT_service_backup.py` — old reference implementation.
 - `_backpop_attention_autograd` (if you see it) — experimental, not on any
   live path.
-- `eval/llama3/config/emotion_original.txt` — raw dataset; the filtered
-  `emotion.txt` is what the launcher actually loads.
+- `eval/llama3/data/emotion_original.txt` — raw dataset; the filtered
+  `data/emotion.txt` is what the launcher actually loads when emotion is
+  the dataset. (Both moved from `config/` to `data/` alongside the alpaca
+  switch — see the data-prep tooling below.)
 - `eval/{llama,llama3}/config/finetuning_config.json` /
   `no_finetuning_config.json` — legacy JSON configs from before the YAML
   migration. No code reads them anymore; safe to ignore.
 
 ## Eval / analysis tooling (`eval/llama3/`)
 
-- `launch_llama3.py` — picks
-  `serving_config_{finetuning,no_finetuning}.yaml` based on
-  `--enable-finetuning`, resolves relative paths to absolute, and execs
-  `api_server.py` with `--config + --override`. The llama1 equivalent is
-  `eval/llama/launch_server.py` (also handles offline HF-cache mode + MPS
-  daemon check).
+- `launch_llama3.py` — picks one of
+  `serving_config_{finetuning,finetuning_packed,finetuning_alpaca,no_finetuning}.yaml`
+  based on `--enable-finetuning` / `--packed-kv` / `--alpaca`, resolves
+  relative paths to absolute, and execs `api_server.py` with `--config +
+  --override`. Selection precedence: `--alpaca` > `--packed-kv` > default.
+  The llama1 equivalent is `eval/llama/launch_server.py` (also handles
+  offline HF-cache mode + MPS daemon check).
 - `auto_benchmark.py` — drives inference load against a running server, logs
   per-request timings and periodic finetuning-token counters. Calls
   `launch_llama3.py` itself if you pass `--co`. Sends adapter as an absolute
   path; the launcher must resolve `lora.adapter_dirs` to match.
   Output filenames are tagged by which knobs are on — order:
-  `_decode_prefill_bwd_kv_<tight|loose>` (allocator tag goes BEFORE the
-  workload-shape tag — see `auto_benchmark.py:438-453`). Flags:
+  `_decode_prefill_bwd_kv_alpaca_<tight|loose>` (allocator tag before the
+  dataset tag, dataset tag before the schedule-shape tag — see
+  `auto_benchmark.py` around the `tags = []` block). Flags:
   - `--decode_graph` / `--prefill_graph` / `--bwd_graph` — append
     `_decode` / `_prefill` / `_bwd` to the suffix and pass corresponding
     overrides to the launcher.
@@ -411,6 +422,11 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
     suffix and passes `--packed-kv` to the launcher; `--no_packed_kv`
     omits `_kv` — that form is what `compare_kv_plot.py` expects for the
     "unified" baseline.
+  - `--alpaca` — select the alpaca-1000 finetuning corpus
+    (`serving_config_finetuning_alpaca.yaml`). Appends `_alpaca` to the
+    suffix and passes `--alpaca` to the launcher. Requires `--co`. The
+    alpaca yaml uses packed_kv, so `--no_packed_kv --alpaca` is rejected
+    to keep the `_kv` tag consistent with the actual allocator.
   - `--track_occupancy` — write `output/occupancy<suffix>.csv` (1 Hz
     sampling); passes `--occupancy_log` to the launcher.
   - `--tight` / `--loose` — pick `timeline_tight.csv` or
@@ -425,6 +441,11 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
 - `compare_kv_plot.py` — `unified` vs `packed_kv` comparison. Takes
   `--suffix _decode_prefill_bwd_tight` etc.; looks up `<suffix>` (unified)
   and `<suffix>_kv` (packed) under `output/`.
+- `compare_emotion_alpaca_plot.py` — emotion vs alpaca comparison at the
+  fixed `_decode_prefill_bwd_kv` config (both datasets pinned to packed_kv
+  + all three graphs on). Looks up `_decode_prefill_bwd_kv_<shape>` (emotion)
+  and `_decode_prefill_bwd_kv_alpaca_<shape>` (alpaca) for `<shape>` in
+  {`tight`, `loose`} and emits one PNG per shape under `plots/`.
 - `plot_loose_tight.py` — single-trace 4-panel plots for one configuration
   (no comparison overlay). Default `--suffix _decode_prefill_bwd_kv`;
   emits `plots/loose_<config>.png` and `plots/tight_<config>.png` from
@@ -443,6 +464,15 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
   `attn_bn_max` / `attn_l_max` and estimates padding blowup.
 - `keep_p95.py` — drops the top 5% longest samples (configurable) so you can
   tighten `attn_l_max` without ever hitting the monolithic fallback.
+- `data/load_emotion.py` / `data/load_alpaca.py` — dataset prep scripts.
+  Both write the same line-based `.txt` format `finetuning_store.load()`
+  expects (one tokenizable sample per non-empty line). `load_alpaca.py`
+  pulls `tatsu-lab/alpaca`, applies char-length filters, randomly
+  subsamples N (default 1000, seeded), renders the Stanford prompt
+  template, and flattens newlines so each rendered prompt is one line.
+  Workflow for a new dataset: run the loader, then `keep_p95.py` to size
+  `attn_l_max` precisely, then point `finetune.data_path` at the
+  `_p95.txt` output.
 
 `MEMORY_ANALYSIS.md` (project root) walks through where every GB of GPU
 residency goes for the `--co --decode_graph --prefill_graph --bwd_graph`
