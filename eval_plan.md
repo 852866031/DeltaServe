@@ -240,7 +240,7 @@ Measure per-iteration decision time inside `_co_serving_step` over a
 / 18 µs uncached — we should be in the same ballpark and just say so.
 A bar chart isn't earned here.
 
-### Exp 6 — Cold-start: value of offline profiling (NEW)
+### Exp 6 — Cold-start: value of offline profiling
 **4×A100, Llama-3-8B, Company X trace replay. Single 2-panel figure.**
 
 Motivation: the system's two-regime predictor and `GraphEligibility`
