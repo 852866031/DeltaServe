@@ -52,7 +52,7 @@ cuda_graph:
 finetune:
   enabled: true
   type: SFT                        # SFT | SFT Profile
-  data_path: config/emotion.txt
+  data_path: data/emotion.txt
   lora_path: adapters/llama3-toy-lora-ft
   num_epochs: 12
   learning_rate: 0.0001

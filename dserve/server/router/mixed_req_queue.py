@@ -164,8 +164,10 @@ class Mixed_ReqQueue:
         if len(self.waiting_req_list) > 0:
             self._init_cache_list(current_batch, lora_ranks)
             # Decode regime check: current batch's next decode step.
-            B_dec = len(current_batch.reqs)
-            K_dec = current_batch.input_tokens()
+            # Eligibility key uses inf-only counts (FT reqs sit alongside
+            # but are not forwarded by the decode kernel).
+            B_dec = self._decode_active_count(current_batch)
+            K_dec = current_batch.get_inference_token_num()
             ml_dec = self._decode_max_len(current_batch)
             dec_will_graph = self._will_decode_use_graph(B_dec, ml_dec)
             predicted_next_decode_time = self.decode_estimator.predict(
@@ -247,6 +249,13 @@ class Mixed_ReqQueue:
                 m = l
         return m
 
+    @staticmethod
+    def _decode_active_count(batch: "Batch") -> int:
+        """Number of inference reqs in the batch — what decode forward
+        actually processes. FT reqs sit alongside until backward consumes
+        them, but they don't enter the decode kernel."""
+        return sum(1 for r in batch.reqs if not r.is_finetuning)
+
     def update_finetuning_status_after_fwd(self, batch: Batch):
         return self.finetuning_manager.update_finetuning_status_after_fwd(batch)
 
@@ -304,10 +313,12 @@ class Mixed_ReqQueue:
                     predicted_next_prefill_time = self.prefill_estimator.predict_coserving(
                         infer_tokens, ft_tokens[:]+[req.input_len])
                     # Next decode after admission: FT reqs are in the batch but decode
-                    # is still inference-only. Eligibility key uses inference-only
-                    # B and max_len.
-                    K_next = current_batch.input_tokens() + req.input_len + new_batch_total_tokens
-                    B_next = len(can_run_list) + 1
+                    # is still inference-only. Eligibility key uses inf-only count
+                    # and max_len, even though the prediction's K still includes
+                    # the new prompt tokens (those become part of the next decode's
+                    # KV state).
+                    K_next = current_batch.get_inference_token_num() + new_batch_total_tokens
+                    B_next = self._decode_active_count(current_batch) + len(can_run_list)
                     ml_next = max(self._decode_max_len(current_batch),
                                   max(infer_tokens) if infer_tokens else 0)
                     dec_will_graph_next = self._will_decode_use_graph(B_next, ml_next)

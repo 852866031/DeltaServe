@@ -254,14 +254,17 @@ class RouterManager:
 
     async def _co_serving_step(self):
         # Sync eligibility mirror with the runner's just-captured buckets.
-        # Cheap one-RPC poll; manager-side mirror is what the scheduler
-        # consults inside generate_new_batch / check_will_starve.
+        # Drain *every* rank's pending list so per-rank lists don't grow
+        # unbounded under TP>1. Captures should be lock-step across ranks
+        # (same batch shapes), so unioning yields the same set.
         try:
-            pending = self.model_rpcs[0].pop_pending_captures()
-            if pending and (pending.get("decode") or pending.get("prefill")):
-                n_new = self.graph_eligibility.note_pending(pending)
-                if n_new > 0:
-                    router_print(f"Eligibility mirror updated: +{n_new} new bucket(s)")
+            n_new = 0
+            for tp_rank in range(self.world_size):
+                pending = self.model_rpcs[tp_rank].pop_pending_captures()
+                if pending:
+                    n_new += self.graph_eligibility.note_pending(pending)
+            if n_new > 0:
+                router_print(f"Eligibility mirror updated: +{n_new} new bucket(s)")
         except Exception as e:
             # Don't break scheduling on a transient RPC hiccup.
             print(f"[Router] pop_pending_captures failed: {e}")
@@ -704,12 +707,14 @@ class RouterManager:
 
         pbar.close()
 
-        # Seed the eligibility mirror from the runner's now-populated cache
-        # so the first data_fit can correctly partition profiling samples
-        # by graph vs eager regime.
+        # Seed the eligibility mirror from every rank's runner cache so the
+        # first data_fit can correctly partition profiling samples by graph
+        # vs eager regime. Under TP>1 all ranks should hold the same set;
+        # unioning is robust either way.
         try:
-            captured = self.model_rpcs[0].get_all_captured_buckets()
-            self.graph_eligibility.seed(captured)
+            for tp_rank in range(self.world_size):
+                captured = self.model_rpcs[tp_rank].get_all_captured_buckets()
+                self.graph_eligibility.seed(captured)
             print(f"[Router] {self.graph_eligibility.summary()}")
         except Exception as e:
             print(f"[Router] get_all_captured_buckets failed: {e}")

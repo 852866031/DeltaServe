@@ -286,7 +286,10 @@ class PrefillExecutionEstimator:
         X = np.column_stack([S, Tin, Tft, np.ones_like(T)])
         alpha, beta, gamma, c = self._linfit(X, T)
 
-        self._params = PrefillParams(
+        # Legacy `fit()` doesn't have eligibility info, so it can't partition
+        # by regime. Treat the whole dataset as eager — that's the safe regime
+        # since γ is identifiable here (co-serve batches are always eager).
+        self._eager_params = PrefillParams(
             alpha=float(alpha),
             beta=float(beta),
             gamma=float(gamma),
@@ -294,8 +297,8 @@ class PrefillExecutionEstimator:
         )
 
         preds = X @ np.array([alpha, beta, gamma, c])
-        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
-        return self._params
+        self.eager_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        return self._eager_params
 
     # ======================================================================
     # Prediction API
@@ -658,11 +661,12 @@ class DecodeExecutionEstimator:
         X = np.column_stack([B, K, np.ones_like(B)])
         delta, epsilon, d = self._linfit(X, T)
 
-        self._params = DecodeParams(delta=float(delta), epsilon=float(epsilon), d=float(d))
+        # Legacy `fit()` has no eligibility info — treat as eager regime.
+        self._eager_params = DecodeParams(delta=float(delta), epsilon=float(epsilon), d=float(d))
 
         preds = X @ np.array([delta, epsilon, d])
-        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
-        return self._params
+        self.eager_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        return self._eager_params
 
     # ----------------------------------------------------------------------
     # Prediction

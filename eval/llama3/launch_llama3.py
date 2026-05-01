@@ -28,6 +28,7 @@ import yaml
 SCRIPT_DIR = Path(__file__).resolve().parent
 SERVING_CONFIG_FT = SCRIPT_DIR / "config" / "serving_config_finetuning.yaml"
 SERVING_CONFIG_FT_PACKED_KV = SCRIPT_DIR / "config" / "serving_config_finetuning_packed.yaml"
+SERVING_CONFIG_FT_ALPACA = SCRIPT_DIR / "config" / "serving_config_finetuning_alpaca.yaml"
 SERVING_CONFIG_NOFT = SCRIPT_DIR / "config" / "serving_config_no_finetuning.yaml"
 
 # Knobs that don't (yet) have YAML homes.
@@ -85,7 +86,7 @@ def resolve_paths(yaml_path: Path) -> dict:
         else:
             adapter_dirs.append(d)
     return {
-        "ft_data_path": str(project_root / "config" / data_name),
+        "ft_data_path": str(project_root / "data" / data_name),
         "ft_lora_path": str(project_root / "adapters" / ft_lora_name),
         "adapter_dirs": adapter_dirs,
     }
@@ -121,6 +122,12 @@ if __name__ == "__main__":
     parser.add_argument("--packed-kv", action="store_true",
                         help="Use the packed_kv allocator config "
                              "(only effective with --enable-finetuning).")
+    parser.add_argument("--alpaca", action="store_true",
+                        help="Use the Alpaca-1000 finetuning config "
+                             "(serving_config_finetuning_alpaca.yaml). "
+                             "Implies --packed-kv (the alpaca yaml uses the "
+                             "packed_kv allocator). Only effective with "
+                             "--enable-finetuning.")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--ft_log_path", type=str,
@@ -133,11 +140,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.enable_finetuning:
-        config_path = SERVING_CONFIG_FT_PACKED_KV if args.packed_kv else SERVING_CONFIG_FT
+        if args.alpaca:
+            config_path = SERVING_CONFIG_FT_ALPACA
+        elif args.packed_kv:
+            config_path = SERVING_CONFIG_FT_PACKED_KV
+        else:
+            config_path = SERVING_CONFIG_FT
     else:
         if args.packed_kv:
             print("⚠️  --packed-kv ignored without --enable-finetuning "
                   "(no packed_kv variant exists for the no-finetune config).")
+        if args.alpaca:
+            print("⚠️  --alpaca ignored without --enable-finetuning "
+                  "(no alpaca variant exists for the no-finetune config).")
         config_path = SERVING_CONFIG_NOFT
     abs_paths = resolve_paths(config_path)
 

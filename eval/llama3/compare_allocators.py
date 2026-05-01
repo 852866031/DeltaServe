@@ -61,7 +61,7 @@ def resolve_paths(yaml_path: Path) -> dict:
         else:
             adapter_dirs.append(d)
     return {
-        "ft_data_path": str(project_root / "config" / data_name),
+        "ft_data_path": str(project_root / "data" / data_name),
         "ft_lora_path": str(project_root / "adapters" / ft_lora_name),
         "adapter_dirs": adapter_dirs,
     }

@@ -151,6 +151,115 @@ throughput. Use `eval/llama3/analyze_finetuning_data.py` and
 - MPS partitioning is the mechanism for true concurrent execution. The model
   RPC startup briefly sets `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=10` and
   `CUDA_DEVICE_MAX_CONNECTIONS=1` while spawning the backward subprocess.
+- **Co-serving prefill is always eager** — the prefill CUDA graph is hard-gated
+  off for any batch with FT tokens at `lora_unordered_batch_mixed.py:171-177`
+  (`not has_ft`). The scheduler, estimator, and eligibility mirror all
+  encode this as an invariant; do not try to predict graph-mode for a
+  co-serve batch.
+
+## SLO-aware scheduling & graph-aware estimators
+
+The scheduler in `router/mixed_req_queue.py` decides every iteration
+whether to start a new prefill batch or admit more FT tokens into the
+running batch, gated by the configured TTFT / avg-TBT / max-TBT SLOs.
+Decisions ride on two execution-time predictors:
+
+```
+T_prefill ≈ α·Σnᵢ² + β·Σnᵢ + γ·T_ft + c     # PrefillExecutionEstimator
+T_decode  ≈ δ·B    + ε·K     + d            # DecodeExecutionEstimator
+```
+
+(`router/tracker.py`). Both are linear lstsq fits over rolling stats.
+
+### Two regimes per estimator
+
+CUDA-graph replay is qualitatively faster than the eager forward, so each
+estimator carries **two parameter sets** and dispatches based on whether
+the upcoming batch will hit the captured graph cache:
+
+- `_graph_params` — fitted only on inf-only batches whose
+  `(bs_bucket, T_bucket)` is in the captured set. Replay time is near-
+  constant per bucket; γ is irrelevant in this regime (FT batches always
+  go eager) so the prefill graph fit is 3-param (α, β, c) instead of 4.
+- `_eager_params` — everything else: uncaptured inf-only + all co-serve.
+  The full 4-param prefill model. γ is identifiable here because all
+  co-serve batches land in this regime.
+
+Cold-start safety: if a regime has fewer than 4 prefill / 3 decode
+samples, `data_fit` keeps its previous params and `predict_*` falls back
+to the other regime. Predictions are pessimistic-safe by construction.
+
+### `GraphEligibility` mirror (push-on-capture)
+
+`router/graph_eligibility.py` is a manager-side mirror of the runner's
+captured-bucket sets. It exposes pure predicates:
+
+```python
+elig.will_prefill_use_graph(has_ft, bs, total)   # always False if has_ft
+elig.will_decode_use_graph(bs, max_len)
+```
+
+Bucket-rounding helpers are imported from `CudaGraphRunner` so any change
+to bucketing in the runner stays in sync automatically.
+
+The mirror is:
+- **Seeded once** after `estimate_finetuning_overhead()` via
+  `model_rpc.get_all_captured_buckets()`.
+- **Updated every scheduler iteration** at the top of `_co_serving_step`
+  via `model_rpc.pop_pending_captures()`. The runner appends to
+  `_pending_*_captures` on each successful capture; the manager drains
+  these lists across all TP ranks.
+- **Consulted at every prediction site** in `mixed_req_queue.py`. The
+  scheduler passes `will_use_graph=...` into `predict_inference` /
+  `predict` so the right param set is selected.
+
+`predict_coserving` and `max_next_ft_tokens` ignore the eligibility flag
+entirely — they're always eager-regime by the co-serving invariant.
+
+### Decode eligibility uses inf-only counts
+
+The decode kernel forwards inference-only requests; FT requests sit in
+the running batch until backward consumes them but don't go through
+decode. So `_will_decode_use_graph(B, max_len)` calls in `mixed_req_queue`
+use `_decode_active_count(batch)` and `_decode_max_len(batch)` (both
+filter out `is_finetuning`), not `len(batch.reqs)` and
+`batch.input_tokens()`.
+
+### Refit cadence
+
+Live refit fires every 256 batches (`tracker.py:check_refit`). At refit:
+1. The mirror is already current (push model).
+2. `data_fit(tracker, eligibility)` walks all historical samples, labels
+   each by regime using the *current* mirror, and refits both regimes.
+3. The lstsq is over the full tracker history, not a sliding window.
+   Expected — eager-regime samples don't go stale because the linear
+   model isn't workload-dependent at this granularity.
+
+### Offline profiling — why it matters here
+
+`profiling_batch_generator.py` populates the tracker before live serving
+and seeds the eligibility mirror by triggering captures during a warmup
+pass. For each unique shape, the **first** run is in `warmup_batches`
+(no stats recorded — captures the graph) and the next `num_repeats`
+runs are recorded (replay timing). This stops the eager-skew that
+otherwise makes the offline fit inflate-then-collapse at the first
+online refit. Coverage:
+- inf-only token sweep (geometric) + decomposition variants for fitting α
+- (inf, ft) coserve grid for fitting γ
+All shapes respect `batch_max_tokens`, `max_finetuning_tokens`, and
+`max_req_total_len`.
+
+### File map
+
+| Concern | File |
+|---|---|
+| Scheduler decisions, SLO gates | `router/mixed_req_queue.py` |
+| Two-regime estimator + tracker | `router/tracker.py` |
+| Manager-side eligibility mirror | `router/graph_eligibility.py` |
+| Capture / drain on the runner side | `common/cuda_graph_runner.py` |
+| RPC surface (`get_all_captured_buckets`, `pop_pending_captures`) | `server/router/model_infer/model_rpc.py` |
+| Pipeline wiring (seed, drain, fit) | `router/manager.py` (`_co_serving_step`, `estimate_finetuning_overhead`) |
+| Offline profiling targets | `router/profiling_batch_generator.py` |
 
 ## Memory / pool gotchas (also load-bearing)
 
@@ -292,13 +401,16 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
   `launch_llama3.py` itself if you pass `--co`. Sends adapter as an absolute
   path; the launcher must resolve `lora.adapter_dirs` to match.
   Output filenames are tagged by which knobs are on — order:
-  `_decode_prefill_bwd_<tight|loose>_kv` — so the comparison plots find the
-  right pair of CSVs. Flags:
+  `_decode_prefill_bwd_kv_<tight|loose>` (allocator tag goes BEFORE the
+  workload-shape tag — see `auto_benchmark.py:438-453`). Flags:
   - `--decode_graph` / `--prefill_graph` / `--bwd_graph` — append
     `_decode` / `_prefill` / `_bwd` to the suffix and pass corresponding
     overrides to the launcher.
-  - `--packed_kv` — append `_kv` to the suffix; passes `--packed-kv` to the
-    launcher.
+  - `--packed_kv` (default on) / `--no_packed_kv` — controls whether the
+    server uses the packed_kv allocator. Default-on appends `_kv` to the
+    suffix and passes `--packed-kv` to the launcher; `--no_packed_kv`
+    omits `_kv` — that form is what `compare_kv_plot.py` expects for the
+    "unified" baseline.
   - `--track_occupancy` — write `output/occupancy<suffix>.csv` (1 Hz
     sampling); passes `--occupancy_log` to the launcher.
   - `--tight` / `--loose` — pick `timeline_tight.csv` or
@@ -313,6 +425,11 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
 - `compare_kv_plot.py` — `unified` vs `packed_kv` comparison. Takes
   `--suffix _decode_prefill_bwd_tight` etc.; looks up `<suffix>` (unified)
   and `<suffix>_kv` (packed) under `output/`.
+- `plot_loose_tight.py` — single-trace 4-panel plots for one configuration
+  (no comparison overlay). Default `--suffix _decode_prefill_bwd_kv`;
+  emits `plots/loose_<config>.png` and `plots/tight_<config>.png` from
+  the corresponding `output/timeline_results<suffix>_<mode>.csv` and
+  `output/bwd_log<suffix>_<mode>.csv`.
 - `compare_occupancy_plot.py` — `(used_pages / total_pages)` over time,
   unified vs packed_kv, drives off the `occupancy<suffix>.csv` files
   emitted by `--track_occupancy`. Two-panel: occupancy % left, used pages
@@ -339,14 +456,16 @@ throughput. Read it first if you're investigating memory.
 |---|---|---|
 | Enable backward graph | `cuda_graph.enable_bwd_cuda_graph` | FFN graph capture in backward |
 | Enable decode graph | `cuda_graph.enable_decode_cuda_graph` | Forward decode graph capture |
+| Enable prefill graph | `cuda_graph.enable_prefill_cuda_graph` | Forward prefill graph capture (piecewise; co-serve always eager regardless) |
 | Padded-attn dispatch | `cuda_graph.use_graphed_bwd_attention` | Padded vs monolithic attn bwd |
 | Padded-attn shape | `cuda_graph.attn_bn_max`, `cuda_graph.attn_l_max` | Hard-fail-to-fallback thresholds |
+| Prefill profiling cap | `cuda_graph.prefill_sweep_max_tokens` | Upper bound on offline prefill sweep T_buckets. `null` = use INF_CAP. Lower it when GPU memory is tight; runtime batches above the cap lazily capture on first hit. |
 | FFN graph size / token budget | `finetune.max_saved_finetuning_tokens` | The single fixed FFN graph shape |
 | Allocator buffer size | `memory.max_finetuning_tokens` | Shared activation/logit buffers |
 | Unified mem pool | `memory.unified_mem_manager_max_size_gb` | KV+activation pool capacity |
 | Allocator implementation | `memory.allocator` | `"unified"` (default, page=1 KV slot) or `"packed_kv"` (page=F KV sub-slots, GQA-packed) |
 | Occupancy tracker | `memory.unified_mem_manager_log_path` | If non-null, allocator daemon writes 1 Hz CSV of (used_pages, occupancy_pct). CPU-only, safe under graph capture. |
-| SLOs | `slo.{ttft_slo, avg_tbt_slo, max_tbt_slo}` | Scheduler trade-off thresholds |
+| SLOs | `slo.{ttft_slo, avg_tbt_slo, max_tbt_slo}` | Scheduler trade-off thresholds (drive admission gates in `mixed_req_queue.py`) |
 | Scheduler | `scheduler.name` | Currently always `"dserve"` |
 
 `PROFILE_EVERY` on `GraphedBackwardRunner` is still a class constant
@@ -362,14 +481,22 @@ Good first reads, in order:
 3. `eval/llama3/config/serving_config_finetuning.yaml` — concrete defaults.
 4. `dserve/server/api_server.py` + `dserve/server/router/manager.py` — request
    flow and how cfg fans out to subprocesses.
-5. `dserve/models/llama/SFT_service.py` — base backward contract,
+5. `dserve/server/router/mixed_req_queue.py` + `dserve/server/router/tracker.py`
+   — SLO-aware scheduling and the two-regime (graph / eager) estimator. Read
+   alongside `dserve/server/router/graph_eligibility.py`.
+6. `dserve/server/router/profiling_batch_generator.py` — offline profiling
+   targets that seed the estimator and the eligibility mirror.
+7. `dserve/models/llama/SFT_service.py` — base backward contract,
    `_maybe_pause()`, the LoRA grad lifecycle.
-6. `dserve/models/llama3/SFT_service.py` — active GQA path
+8. `dserve/models/llama3/SFT_service.py` — active GQA path
    (`_backpop_attention`, `_backpop_attention_padded*`).
-7. `dserve/models/llama/SFT_service_graph.py` — graph runner and the
+9. `dserve/models/llama/SFT_service_graph.py` — graph runner and the
    capture/replay lifecycle, persistent-buffer rationale.
-8. `dserve/common/unified_mem_allocator.py` + `packed_kv_mem_allocator.py`
-   + `allocator_factory.py` — pool layout, accessors, the unified vs
-   packed_kv split, occupancy tracker.
-9. `MEMORY_ANALYSIS.md` (project root) — what consumes GPU memory and
-   why; read before any memory-side work.
+10. `dserve/common/cuda_graph_runner.py` — forward-graph runner shared by
+    decode and piecewise prefill; bucket helpers (`get_*_bucket`) are the
+    canonical bucketing logic mirrored by `GraphEligibility`.
+11. `dserve/common/unified_mem_allocator.py` + `packed_kv_mem_allocator.py`
+    + `allocator_factory.py` — pool layout, accessors, the unified vs
+    packed_kv split, occupancy tracker.
+12. `MEMORY_ANALYSIS.md` (project root) — what consumes GPU memory and
+    why; read before any memory-side work.

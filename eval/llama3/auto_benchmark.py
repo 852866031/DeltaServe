@@ -394,26 +394,49 @@ async def main() -> None:
     ap.add_argument("--decode_graph", action="store_true", default=False)     # decode  CUDA graph
     ap.add_argument("--prefill_graph", action="store_true", default=False)    # prefill CUDA graph
     ap.add_argument("--bwd_graph", action="store_true", default=False)        # backward CUDA graph
-    ap.add_argument("--packed_kv", action="store_true", default=False,
-                    help="Use the packed_kv allocator (sets memory.allocator=packed_kv "
-                         "via launch_llama3.py). Tags output filenames with '_kv'.")
+    # packed_kv allocator. Default-on because GQA-packed paging is the
+    # production allocator; pass --no_packed_kv to fall back to the
+    # legacy "unified" path (e.g. for comparison runs).
+    kv_group = ap.add_mutually_exclusive_group()
+    kv_group.add_argument(
+        "--packed_kv", dest="packed_kv", action="store_true", default=True,
+        help="Use the packed_kv allocator (sets memory.allocator=packed_kv "
+             "via launch_llama3.py). Tags output filenames with '_kv'. "
+             "DEFAULT: on.")
+    kv_group.add_argument(
+        "--no_packed_kv", dest="packed_kv", action="store_false",
+        help="Disable the packed_kv allocator (falls back to 'unified'). "
+             "Output filenames omit the '_kv' tag — the form expected by "
+             "compare_kv_plot.py for the baseline side of the comparison.")
     ap.add_argument("--track_occupancy", action="store_true", default=False,
                     help="Enable allocator page-occupancy sampling. Writes "
                          "output/occupancy<suffix>.csv (one row per second).")
+    ap.add_argument("--alpaca", action="store_true", default=False,
+                    help="Use the Alpaca-1000 finetuning config "
+                         "(serving_config_finetuning_alpaca.yaml). Passes "
+                         "--alpaca to the launcher and tags output filenames "
+                         "with '_alpaca'. The alpaca yaml uses packed_kv, so "
+                         "--no_packed_kv is rejected when --alpaca is set.")
     # ft_log_path and out_csv default to base names; final paths are composed
     # below under OUTPUT_DIR with a suffix encoding which graphs are enabled.
     ap.add_argument("--ft_log_path", type=str, default="bwd_log.csv")
     ap.add_argument("--out_csv", default="timeline_results.csv")
 
     # warmup config
-    ap.add_argument("--warmup_count", type=int, default=40)
-    ap.add_argument("--warmup_duration_s", type=float, default=5.0)
+    ap.add_argument("--warmup_count", type=int, default=100)
+    ap.add_argument("--warmup_duration_s", type=float, default=10.0)
     ap.add_argument("--warmup_rest_s", type=float, default=2.0)
 
     args = ap.parse_args()
 
     if args.tight and args.loose:
         ap.error("--tight and --loose are mutually exclusive")
+    if args.alpaca and not args.packed_kv:
+        ap.error("--alpaca implies the packed_kv allocator (the alpaca yaml "
+                 "uses it); drop --no_packed_kv.")
+    if args.alpaca and not args.co:
+        ap.error("--alpaca requires --co (the alpaca yaml is a finetuning "
+                 "config; without --co the no-finetune yaml is used instead).")
     if args.loose:
         args.timeline_csv = str(SCRIPT_DIR / "timeline_loose.csv")
     elif args.tight:
@@ -447,6 +470,11 @@ async def main() -> None:
     # find both files for the same workload shape.
     if args.packed_kv:
         tags.append("kv")
+    # Dataset tag sits after the allocator tag and before the schedule-shape
+    # tag so emotion vs. alpaca comparisons under the same allocator share
+    # a stable prefix.
+    if args.alpaca:
+        tags.append("alpaca")
     if args.tight:
         tags.append("tight")
     elif args.loose:
@@ -487,6 +515,8 @@ async def main() -> None:
         cmd.append("--enable-bwd-cuda-graph")
     if args.packed_kv:
         cmd.append("--packed-kv")
+    if args.alpaca:
+        cmd.append("--alpaca")
     if occupancy_log is not None:
         cmd.append("--occupancy_log")
         cmd.append(occupancy_log)
