@@ -371,6 +371,32 @@ class ModelRpcServer(rpyc.Service):
             stats["decode"] = (r.total_decode_graph_bytes(), r.num_decode_graphs())
             stats["prefill"] = (r.total_prefill_graph_bytes(), r.num_prefill_graphs())
         return stats
+
+    def exposed_get_all_captured_buckets(self):
+        """Return the full set of currently captured (bs, bucket) keys —
+        used by the manager to seed its GraphEligibility mirror after
+        offline profiling. Returns {'decode': [...], 'prefill': [...]}."""
+        from dserve.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
+        r = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+        if r is None:
+            return {"decode": [], "prefill": []}
+        return {
+            "decode": r.all_decode_buckets(),
+            "prefill": r.all_prefill_buckets(),
+        }
+
+    def exposed_pop_pending_captures(self):
+        """Drain & return buckets newly captured since last call. Manager polls
+        this on each scheduler iteration to keep its eligibility mirror current.
+        Returns {'decode': [...], 'prefill': [...]}."""
+        from dserve.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
+        r = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+        if r is None:
+            return {"decode": [], "prefill": []}
+        return {
+            "decode": r.pop_pending_decode_captures(),
+            "prefill": r.pop_pending_prefill_captures(),
+        }
     
     def compare_lora_drift_per_layer(self):
         """
@@ -440,6 +466,8 @@ class ModelRpcClient:
             self._merge_batch = async_wrap(self.model.merge_batch)
             self._remove_batch = async_wrap(self.model.remove_batch)
             self._get_graph_mem_stats = self.model.get_graph_mem_stats
+            self._get_all_captured_buckets = self.model.get_all_captured_buckets
+            self._pop_pending_captures = self.model.pop_pending_captures
         else:
             self._init_model = self.model.exposed_init_model
             self._load_adapters = self.model.exposed_load_adapters
@@ -457,6 +485,8 @@ class ModelRpcClient:
             self._merge_batch = self.model.exposed_merge_batch
             self._remove_batch = self.model.exposed_remove_batch
             self._get_graph_mem_stats = self.model.exposed_get_graph_mem_stats
+            self._get_all_captured_buckets = self.model.exposed_get_all_captured_buckets
+            self._pop_pending_captures = self.model.exposed_pop_pending_captures
         return
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
@@ -539,6 +569,23 @@ class ModelRpcClient:
             from rpyc.utils.classic import obtain
             return obtain(self._get_graph_mem_stats())
         return self._get_graph_mem_stats()
+
+    def get_all_captured_buckets(self):
+        """Snapshot of currently captured (bs, bucket) keys per modality.
+        Used to seed the manager's GraphEligibility mirror once after
+        offline profiling. Returns {'decode': [...], 'prefill': [...]}."""
+        if self.use_rpc:
+            from rpyc.utils.classic import obtain
+            return obtain(self._get_all_captured_buckets())
+        return self._get_all_captured_buckets()
+
+    def pop_pending_captures(self):
+        """Drain newly captured buckets from the runner. Cheap call —
+        manager polls at scheduler-iteration cadence."""
+        if self.use_rpc:
+            from rpyc.utils.classic import obtain
+            return obtain(self._pop_pending_captures())
+        return self._pop_pending_captures()
 
     async def decode_batch(self, batch_id, decode_count=-1):
         ans = self._decode_batch(batch_id, decode_count=decode_count)

@@ -3,6 +3,7 @@ from functools import partial
 from dserve.server.router.profile_req_queue import Profile_ReqQueue
 from dserve.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
 from dserve.server.router.profiling_batch_generator import ProfilingBatchGenerator
+from dserve.server.router.graph_eligibility import GraphEligibility
 from tqdm import tqdm
 import uvloop
 import asyncio
@@ -145,8 +146,14 @@ class RouterManager:
         self.prefill_estimator = PrefillExecutionEstimator()
         self.decode_estimator = DecodeExecutionEstimator()
         self.batch_exec_tracker = BatchExecutionTracker()
+        self.graph_eligibility = GraphEligibility(
+            decode_enabled=getattr(input_params, "enable_cuda_graph", False),
+            prefill_enabled=getattr(input_params, "enable_prefill_cuda_graph", False),
+        )
         if isinstance(self.req_queue, Mixed_ReqQueue):
-            self.req_queue.set_estimators(self.prefill_estimator, self.decode_estimator)
+            self.req_queue.set_estimators(
+                self.prefill_estimator, self.decode_estimator, self.graph_eligibility,
+            )
 
         self.model_rpc_ports = model_rpc_ports
 
@@ -246,9 +253,22 @@ class RouterManager:
             self.req_queue.reset_abort_list()
 
     async def _co_serving_step(self):
+        # Sync eligibility mirror with the runner's just-captured buckets.
+        # Cheap one-RPC poll; manager-side mirror is what the scheduler
+        # consults inside generate_new_batch / check_will_starve.
+        try:
+            pending = self.model_rpcs[0].pop_pending_captures()
+            if pending and (pending.get("decode") or pending.get("prefill")):
+                n_new = self.graph_eligibility.note_pending(pending)
+                if n_new > 0:
+                    router_print(f"Eligibility mirror updated: +{n_new} new bucket(s)")
+        except Exception as e:
+            # Don't break scheduling on a transient RPC hiccup.
+            print(f"[Router] pop_pending_captures failed: {e}")
+
         if self.batch_exec_tracker.check_refit():
-            self.prefill_estimator.data_fit(self.batch_exec_tracker)
-            self.decode_estimator.data_fit(self.batch_exec_tracker)
+            self.prefill_estimator.data_fit(self.batch_exec_tracker, self.graph_eligibility)
+            self.decode_estimator.data_fit(self.batch_exec_tracker, self.graph_eligibility)
             router_print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
             router_print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
         if self.running_batch is None:
@@ -364,12 +384,18 @@ class RouterManager:
             earliest_arrival_time = batch.get_earliest_arrival_time()
             prefill_end_time = time.time()
             duration = prefill_end_time - prefill_start_time
+            # Logging-only prediction. has_ft is determined by whether
+            # finetuning_tokens_list is non-empty.
+            has_ft_log = bool(finetuning_tokens_list) and sum(finetuning_tokens_list) > 0
+            will_graph_log = self.graph_eligibility.will_prefill_use_graph(
+                has_ft_log, len(inference_tokens_list), sum(inference_tokens_list))
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
                 finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=duration,
-                predicted_duration = self.prefill_estimator.predict_inference(inference_tokens_list))
+                predicted_duration=self.prefill_estimator.predict_inference(
+                    inference_tokens_list, will_use_graph=will_graph_log))
             batch.record_time_to_first_token(prefill_end_time)
             if earliest_arrival_time is not None:
                 if prefill_end_time - earliest_arrival_time <= self.req_queue.ttft_slo * 1.05:
@@ -437,12 +463,17 @@ class RouterManager:
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
         duration = decode_end_time - start_time
         if self.decode_step_count < 8:
+            B_dec_log = len(inference_tokens_list)
+            K_dec_log = sum(inference_tokens_list)
+            ml_dec_log = max(inference_tokens_list) if inference_tokens_list else 0
+            will_graph_dec_log = self.graph_eligibility.will_decode_use_graph(B_dec_log, ml_dec_log)
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
                 finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=duration,
-                predicted_duration = self.decode_estimator.predict(sum(inference_tokens_list), len(inference_tokens_list))
+                predicted_duration=self.decode_estimator.predict(
+                    K_dec_log, B_dec_log, will_use_graph=will_graph_dec_log)
         )
         batch.record_token_time(decode_end_time)
         await self._handle_finish_req(batch, has_new_finished_req)
@@ -673,8 +704,18 @@ class RouterManager:
 
         pbar.close()
 
-        self.prefill_estimator.data_fit(self.batch_exec_tracker)
-        self.decode_estimator.data_fit(self.batch_exec_tracker)
+        # Seed the eligibility mirror from the runner's now-populated cache
+        # so the first data_fit can correctly partition profiling samples
+        # by graph vs eager regime.
+        try:
+            captured = self.model_rpcs[0].get_all_captured_buckets()
+            self.graph_eligibility.seed(captured)
+            print(f"[Router] {self.graph_eligibility.summary()}")
+        except Exception as e:
+            print(f"[Router] get_all_captured_buckets failed: {e}")
+
+        self.prefill_estimator.data_fit(self.batch_exec_tracker, self.graph_eligibility)
+        self.decode_estimator.data_fit(self.batch_exec_tracker, self.graph_eligibility)
         print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
         print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
 

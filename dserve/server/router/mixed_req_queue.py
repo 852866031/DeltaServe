@@ -163,15 +163,22 @@ class Mixed_ReqQueue:
         #     self.check_iter+=1
         if len(self.waiting_req_list) > 0:
             self._init_cache_list(current_batch, lora_ranks)
-            # if not self._can_add_new_req(self.waiting_req_list[0], lora_ranks):
-            #     print(f"[Router] Queuing UP.")
-            #     return False
-            predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
+            # Decode regime check: current batch's next decode step.
+            B_dec = len(current_batch.reqs)
+            K_dec = current_batch.input_tokens()
+            ml_dec = self._decode_max_len(current_batch)
+            dec_will_graph = self._will_decode_use_graph(B_dec, ml_dec)
+            predicted_next_decode_time = self.decode_estimator.predict(
+                K_dec, B_dec, will_use_graph=dec_will_graph)
             predicted_next_checking_time = time.time() + predicted_next_decode_time
             pending_inf_token_list = []
             for req in self.waiting_req_list:
                 pending_inf_token_list.append(req.input_len)
-            predicted_next_prefill_time = self.prefill_estimator.predict_inference(pending_inf_token_list)
+            # Prefill regime check: hypothetical inf-only batch of waiting reqs.
+            pre_will_graph = self._will_prefill_use_graph(
+                False, len(pending_inf_token_list), sum(pending_inf_token_list))
+            predicted_next_prefill_time = self.prefill_estimator.predict_inference(
+                pending_inf_token_list, will_use_graph=pre_will_graph)
             time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
             return time_left < 0
         return False
@@ -209,9 +216,36 @@ class Mixed_ReqQueue:
     def ready_for_bwd(self):
         return self.finetuning_manager.ready_for_bwd()
 
-    def set_estimators(self, prefill_estimator, decode_estimator):
+    def set_estimators(self, prefill_estimator, decode_estimator, graph_eligibility=None):
+        """`graph_eligibility` is optional for back-compat — when None, the
+        scheduler treats every batch as eager (safe but pessimistic)."""
         self.prefill_estimator = prefill_estimator
         self.decode_estimator = decode_estimator
+        self.graph_eligibility = graph_eligibility
+
+    # ─── Eligibility helpers ────────────────────────────────────────────
+    def _will_prefill_use_graph(self, has_ft: bool, batch_size: int, total_tokens: int) -> bool:
+        if self.graph_eligibility is None:
+            return False
+        return self.graph_eligibility.will_prefill_use_graph(has_ft, batch_size, total_tokens)
+
+    def _will_decode_use_graph(self, batch_size: int, max_len: int) -> bool:
+        if self.graph_eligibility is None:
+            return False
+        return self.graph_eligibility.will_decode_use_graph(batch_size, max_len)
+
+    @staticmethod
+    def _decode_max_len(batch: "Batch") -> int:
+        """max sequence length across inference reqs in a running batch
+        (mirrors `nopad_max_len_in_batch` at runtime)."""
+        m = 0
+        for r in batch.reqs:
+            if r.is_finetuning:
+                continue
+            l = r.input_len + len(r.output_ids)
+            if l > m:
+                m = l
+        return m
 
     def update_finetuning_status_after_fwd(self, batch: Batch):
         return self.finetuning_manager.update_finetuning_status_after_fwd(batch)
@@ -266,8 +300,19 @@ class Mixed_ReqQueue:
                 if req is not None and current_batch is not None:
                     # check avg tbt slo
                     worst_req_last_batch = current_batch.get_req_with_worst_avg_tbt()
-                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens[:]+[req.input_len])
-                    predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
+                    # predict_coserving is always eager (FT in batch → eager regime).
+                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(
+                        infer_tokens, ft_tokens[:]+[req.input_len])
+                    # Next decode after admission: FT reqs are in the batch but decode
+                    # is still inference-only. Eligibility key uses inference-only
+                    # B and max_len.
+                    K_next = current_batch.input_tokens() + req.input_len + new_batch_total_tokens
+                    B_next = len(can_run_list) + 1
+                    ml_next = max(self._decode_max_len(current_batch),
+                                  max(infer_tokens) if infer_tokens else 0)
+                    dec_will_graph_next = self._will_decode_use_graph(B_next, ml_next)
+                    predicted_next_decode_time = self.decode_estimator.predict(
+                        K_next, B_next, will_use_graph=dec_will_graph_next)
                     next_token_time = predicted_next_prefill_time + predicted_next_decode_time
                     if next_token_time > self.max_tbt_slo:
                         #print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")

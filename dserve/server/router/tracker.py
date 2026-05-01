@@ -161,26 +161,46 @@ class PrefillParams:
 
 class PrefillExecutionEstimator:
     """
-    Execution time model (prefill):
+    Execution time model (prefill), per regime:
 
         T_prefill ≈ α * Σ n_i² + β * T_in + γ * T_ft + c
 
-    - Σ n_i² = quadratic attention term over *all* requests
-               (inference + fine-tuning).
-    - T_in   = total tokens in batch (inference + FT).
-    - T_ft   = total FT tokens only (activation saving overhead).
+    Two regimes are fit separately because the runtime is qualitatively
+    different:
 
-    Representation:
-      • For inference-only batch: List[int] of per-request token counts.
-      • For co-serving batch: two independent flat lists:
-            inference_tokens: List[int]
-            finetuning_tokens: List[int]
-        They are *not* index-aligned; they are two disjoint sets of requests.
+      * graph regime (`_graph_params`) — inference-only batches whose
+        (bs_bucket, T_bucket) is captured. Replay time is near-constant
+        per bucket; γ is irrelevant (FT batches always go eager). α/β
+        absorb whatever weak shape dependence remains.
+      * eager regime (`_eager_params`) — everything else: uncaptured
+        inference-only buckets AND all co-serving batches. Full
+        α/β/γ/c. γ captures the activation-saving overhead from
+        co-serving.
+
+    Caller is expected to know which regime the predicted batch will
+    run in (via GraphEligibility) and pass `will_use_graph=...` to
+    `predict_inference`. `predict_coserving` is unconditionally eager
+    because the runtime gates the prefill graph off for any batch with
+    FT tokens (`lora_unordered_batch_mixed.py`, `not has_ft`).
     """
 
     def __init__(self) -> None:
-        self._params = PrefillParams()
-        self.fit_rmse: Optional[float] = None
+        self._graph_params = PrefillParams()
+        self._eager_params = PrefillParams()
+        self.graph_fit_rmse: Optional[float] = None
+        self.eager_fit_rmse: Optional[float] = None
+
+    @property
+    def fit_rmse(self) -> Optional[float]:
+        """Back-compat: legacy callers read .fit_rmse. Eager is always
+        present once any data exists; report it as the headline."""
+        return self.eager_fit_rmse if self.eager_fit_rmse is not None else self.graph_fit_rmse
+
+    @fit_rmse.setter
+    def fit_rmse(self, value):
+        # Setters at verify_* sites — preserve existing semantics by
+        # bumping the eager rmse (the verify path is eager-default).
+        self.eager_fit_rmse = value
 
     @staticmethod
     def _as_np(x: Iterable[float]) -> np.ndarray:
@@ -280,9 +300,25 @@ class PrefillExecutionEstimator:
     # ======================================================================
     # Prediction API
     # ======================================================================
-    def predict_inference(self, token_list: List[int]) -> float:
-        """Predict prefill time for an inference-only batch."""
-        p = self._params
+    def _select_params(self, will_use_graph: bool) -> PrefillParams:
+        """Pick params for the requested regime, falling back if the
+        regime has no fit yet (cold-start safety)."""
+        if will_use_graph and self._graph_params.alpha is not None:
+            return self._graph_params
+        if not will_use_graph and self._eager_params.alpha is not None:
+            return self._eager_params
+        # Fallback: whatever's available.
+        return self._eager_params if self._eager_params.alpha is not None else self._graph_params
+
+    def predict_inference(self, token_list: List[int], will_use_graph: bool = False) -> float:
+        """Predict prefill time for an inference-only batch.
+
+        `will_use_graph`: caller's eligibility result. When False, uses
+        eager-regime params (which always exist if any data has been
+        seen). When True, uses graph-regime params if fitted, else
+        falls back to eager.
+        """
+        p = self._select_params(will_use_graph)
         if any(v is None for v in (p.alpha, p.beta, p.c)):
             print("Model not fitted yet")
             return 0.5
@@ -296,8 +332,9 @@ class PrefillExecutionEstimator:
 
         pred = p.alpha * S + p.beta * Tin + p.c
 
-        if self.fit_rmse:
-            pred *= 1 + 1.5 * self.fit_rmse
+        rmse = self.graph_fit_rmse if (will_use_graph and self._graph_params.alpha is not None) else self.eager_fit_rmse
+        if rmse:
+            pred *= 1 + 1.5 * rmse
         return float(pred)
 
     def predict_coserving(
@@ -306,13 +343,11 @@ class PrefillExecutionEstimator:
         finetuning_tokens: List[int],
     ) -> float:
         """
-        Predict prefill time for a co-serving batch.
-
-        inference_tokens: per-request inference token counts
-        finetuning_tokens: per-request FT token counts
+        Predict prefill time for a co-serving batch. Unconditionally
+        uses eager-regime params — the runtime gates the prefill graph
+        off for any batch with FT tokens.
         """
-
-        p = self._params
+        p = self._eager_params
         if any(v is None for v in (p.alpha, p.beta, p.gamma, p.c)):
             print("Model not fitted yet")
             return 0.5
@@ -330,8 +365,8 @@ class PrefillExecutionEstimator:
         Tft = float(np.sum(n_ft))
 
         pred = p.alpha * S + p.beta * Tin + p.gamma * Tft + p.c
-        if self.fit_rmse:
-            pred *= 1 + 1.5 * self.fit_rmse
+        if self.eager_fit_rmse:
+            pred *= 1 + 1.5 * self.eager_fit_rmse
         return float(pred)
 
     # ======================================================================
@@ -377,11 +412,13 @@ class PrefillExecutionEstimator:
           - inference requests: inf_tokens
           - FT requests:        ft_tokens
         New FT request: adds x tokens (as its own request).
+        Unconditionally uses eager-regime params — adding any FT token
+        forces the runtime onto the eager prefill path.
         """
 
-        p = self._params
+        p = self._eager_params
         if any(v is None for v in (p.alpha, p.beta, p.gamma, p.c)):
-            raise ValueError("PrefillExecutionEstimator not fitted yet.")
+            raise ValueError("PrefillExecutionEstimator (eager) not fitted yet.")
 
         # No SLO → effectively unlimited
         if earliest_req_time is None:
@@ -451,21 +488,28 @@ class PrefillExecutionEstimator:
         x_max = max(0, math.floor(x_root))
         return int(x_max)
 
-    def data_fit(self, tracker: "BatchExecutionTracker") -> PrefillParams:
+    def data_fit(self, tracker: "BatchExecutionTracker", eligibility=None):
         """
-        Fit the prefill estimator from tracked PREFILL batches.
+        Fit the prefill estimator from tracked PREFILL batches, partitioned
+        by regime:
 
-        A PREFILL batch may be:
-            1) inference-only:  n_inf != [], n_ft == []
-            2) FT-only:         n_inf == [], n_ft != []
-            3) co-serving:      n_inf != [], n_ft != []
-        All are valid.
+          * graph regime: inference-only batches whose
+            (bs_bucket, T_bucket) is in the eligibility mirror.
+          * eager regime: everything else (uncaptured inf-only + all
+            co-serving). γ only matters here.
+
+        If `eligibility` is None or unfitted, all batches go into the
+        eager regime (back-compat for callers that haven't been wired
+        to graph-aware scheduling yet).
+
+        Returns (eager_params, graph_params). Each may have all-None
+        fields if its regime didn't have enough samples (≥4 required).
         """
+        # Per-regime feature lists
+        eager_S, eager_Tin, eager_Tft, eager_T = [], [], [], []
+        graph_S, graph_Tin, graph_T = [], [], []
 
-        sum_n2_list = []
-        T_in_list = []
-        T_ft_list = []
-        times = []
+        n_total_seen = 0
 
         for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration in zip(
             tracker.inference_tokens_list,
@@ -476,57 +520,79 @@ class PrefillExecutionEstimator:
             if exec_type != BatchExecutionType.PREFILL:
                 continue
 
-            # Convert to numpy arrays (flat integer lists)
             n_inf = np.asarray(inf_tokens_per_batch, dtype=float)
             n_ft  = np.asarray(ft_tokens_per_batch, dtype=float)
 
-            # Skip totally empty batches (should not happen but safe)
             if n_inf.size == 0 and n_ft.size == 0:
                 continue
 
-            # Combine inference + FT requests
+            has_ft = n_ft.size > 0 and float(np.sum(n_ft)) > 0
             n_total = (
                 np.concatenate([n_inf, n_ft])
                 if (n_inf.size and n_ft.size)
                 else (n_inf if n_inf.size else n_ft)
             )
 
-            # Compute model terms
-            sum_n2 = float(np.sum(n_total ** 2))   # Σ n_i^2
-            T_in = float(np.sum(n_total))          # Σ n_i
-            T_ft = float(np.sum(n_ft))             # Σ (FT tokens only)
+            sum_n2 = float(np.sum(n_total ** 2))
+            T_in = float(np.sum(n_total))
+            T_ft = float(np.sum(n_ft)) if n_ft.size else 0.0
 
-            sum_n2_list.append(sum_n2)
-            T_in_list.append(T_in)
-            T_ft_list.append(T_ft)
-            times.append(float(duration))
+            # Decide regime
+            is_graph = False
+            if not has_ft and eligibility is not None:
+                bs = int(n_inf.size)
+                total = int(np.sum(n_inf))
+                is_graph = bool(eligibility.will_prefill_use_graph(False, bs, total))
 
-        # Require enough samples
-        if len(times) < 4:
+            if is_graph:
+                graph_S.append(sum_n2)
+                graph_Tin.append(T_in)
+                graph_T.append(float(duration))
+            else:
+                eager_S.append(sum_n2)
+                eager_Tin.append(T_in)
+                eager_Tft.append(T_ft)
+                eager_T.append(float(duration))
+            n_total_seen += 1
+
+        if n_total_seen < 4:
             raise ValueError(
-                "Not enough PREFILL batches to fit PrefillExecutionEstimator (need ≥4)."
+                f"Not enough PREFILL batches to fit (need ≥4, got {n_total_seen})."
             )
 
-        S   = np.asarray(sum_n2_list)
-        Tin = np.asarray(T_in_list)
-        Tft = np.asarray(T_ft_list)
-        T   = np.asarray(times)
+        # Eager fit (4 params)
+        if len(eager_T) >= 4:
+            S = np.asarray(eager_S); Tin = np.asarray(eager_Tin)
+            Tft = np.asarray(eager_Tft); T = np.asarray(eager_T)
+            X = np.column_stack([S, Tin, Tft, np.ones_like(T)])
+            a, b, g, c = self._linfit(X, T)
+            self._eager_params = PrefillParams(
+                alpha=float(a), beta=float(b), gamma=float(g), c=float(c))
+            preds = X @ np.array([a, b, g, c])
+            self.eager_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        else:
+            print(f"[PrefillEstimator] eager regime has {len(eager_T)} samples (<4); keeping previous eager params")
 
-        # Solve linear regression
-        X = np.column_stack([S, Tin, Tft, np.ones_like(T)])
-        alpha, beta, gamma, c = self._linfit(X, T)
+        # Graph fit (3 params: γ omitted, no FT in graph-regime data)
+        if len(graph_T) >= 4:
+            S = np.asarray(graph_S); Tin = np.asarray(graph_Tin); T = np.asarray(graph_T)
+            X = np.column_stack([S, Tin, np.ones_like(T)])
+            a, b, c = self._linfit(X, T)
+            self._graph_params = PrefillParams(
+                alpha=float(a), beta=float(b), gamma=0.0, c=float(c))
+            preds = X @ np.array([a, b, c])
+            self.graph_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        else:
+            if len(graph_T) > 0:
+                print(f"[PrefillEstimator] graph regime has {len(graph_T)} samples (<4); keeping previous graph params")
 
-        self._params = PrefillParams(
-            alpha=float(alpha),
-            beta=float(beta),
-            gamma=float(gamma),
-            c=float(c),
+        print(
+            f"[PrefillEstimator] fit: eager={len(eager_T)} samples "
+            f"(rmse={self.eager_fit_rmse}), graph={len(graph_T)} samples "
+            f"(rmse={self.graph_fit_rmse})"
         )
 
-        preds = X @ np.array([alpha, beta, gamma, c])
-        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
-
-        return self._params
+        return self._eager_params, self._graph_params
         
 
 @dataclass
@@ -537,18 +603,32 @@ class DecodeParams:
 
 class DecodeExecutionEstimator:
     """
-    Execution time model (decode per step):
+    Execution time model (decode per step), per regime:
 
         T_decode ≈ δ * B_t + ε * K_t + d
 
     where:
         B_t = number of active inference requests
         K_t = total KV-cache tokens across requests
+
+    Two regimes (graph / eager) — exactly the same split as prefill.
+    Decode is always inference-only (no FT) so the only signal that
+    determines regime is whether the (B, max_len_bucket) is captured.
     """
 
     def __init__(self) -> None:
-        self._params = DecodeParams()
-        self.fit_rmse = None  # same as PrefillExecutionEstimator
+        self._graph_params = DecodeParams()
+        self._eager_params = DecodeParams()
+        self.graph_fit_rmse = None
+        self.eager_fit_rmse = None
+
+    @property
+    def fit_rmse(self):
+        return self.eager_fit_rmse if self.eager_fit_rmse is not None else self.graph_fit_rmse
+
+    @fit_rmse.setter
+    def fit_rmse(self, value):
+        self.eager_fit_rmse = value
 
     @staticmethod
     def _as_np_1d(x: Iterable[float]) -> np.ndarray:
@@ -587,11 +667,17 @@ class DecodeExecutionEstimator:
     # ----------------------------------------------------------------------
     # Prediction
     # ----------------------------------------------------------------------
-    def predict(self, total_tokens: float, batch_size: float) -> float:
-        p = self._params
+    def _select_params(self, will_use_graph: bool) -> DecodeParams:
+        if will_use_graph and self._graph_params.delta != 0.0:
+            return self._graph_params
+        if not will_use_graph and self._eager_params.delta != 0.0:
+            return self._eager_params
+        # Cold-start fallback: pick whichever is fitted.
+        return self._graph_params if self._graph_params.delta != 0.0 else self._eager_params
+
+    def predict(self, total_tokens: float, batch_size: float, will_use_graph: bool = False) -> float:
+        p = self._select_params(will_use_graph)
         pred = p.delta * batch_size + p.epsilon * total_tokens + p.d
-        # if self.fit_rmse:
-        #     pred += 1.2 * self.fit_rmse
         return float(pred)
 
     def verify(self, total_tokens: float, batch_size: float, actual_time: float) -> float:
@@ -604,18 +690,14 @@ class DecodeExecutionEstimator:
     # ----------------------------------------------------------------------
     # Fitting directly from the tracker
     # ----------------------------------------------------------------------
-    def data_fit(self, tracker: BatchExecutionTracker) -> DecodeParams:
+    def data_fit(self, tracker: BatchExecutionTracker, eligibility=None):
         """
-        Fit using DECODE batches from tracker.
-
-        For each DECODE batch:
-            B_t = number of inference requests in batch
-            K_t = total inference tokens (KV cache size)
+        Fit using DECODE batches from tracker, partitioned by graph
+        eligibility. If `eligibility` is None or unfitted, all samples
+        go into eager (back-compat).
         """
-
-        B_list = []
-        K_list = []
-        T_list = []
+        eager_B, eager_K, eager_T = [], [], []
+        graph_B, graph_K, graph_T = [], [], []
 
         for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration in zip(
             tracker.inference_tokens_list,
@@ -626,38 +708,57 @@ class DecodeExecutionEstimator:
             if exec_type != BatchExecutionType.DECODE:
                 continue
 
-            # Decode only applies to inference requests
-            # inf_tokens_per_batch = List[List[int]] OR List[int]
             try:
-                # Sum per-request input lengths if nested
                 n_inf = np.asarray([sum(toks) for toks in inf_tokens_per_batch], dtype=float)
             except Exception:
-                # If already flat: [12, 18, 22]
                 n_inf = np.asarray(inf_tokens_per_batch, dtype=float)
 
             if len(n_inf) == 0:
                 continue
 
-            B = len(n_inf)          # number of active requests
-            K = float(np.sum(n_inf))  # total KV cache size
+            B = len(n_inf)
+            K = float(np.sum(n_inf))
 
-            B_list.append(B)
-            K_list.append(K)
-            T_list.append(duration)
+            # Decode bucket key uses the largest-per-request token count
+            # as max_len, mirroring `nopad_max_len_in_batch` at runtime.
+            max_len = int(n_inf.max()) if n_inf.size > 0 else 0
+            is_graph = False
+            if eligibility is not None:
+                is_graph = bool(eligibility.will_decode_use_graph(B, max_len))
 
-        # Need at least 3 decode samples to fit Δ, ε, d
-        if len(T_list) < 3:
-            raise ValueError("Not enough DECODE batches to fit DecodeExecutionEstimator (need ≥3).")
+            if is_graph:
+                graph_B.append(B); graph_K.append(K); graph_T.append(duration)
+            else:
+                eager_B.append(B); eager_K.append(K); eager_T.append(duration)
 
-        B_arr = np.asarray(B_list, dtype=float)
-        K_arr = np.asarray(K_list, dtype=float)
-        T_arr = np.asarray(T_list, dtype=float)
+        n_total = len(eager_T) + len(graph_T)
+        if n_total < 3:
+            raise ValueError(f"Not enough DECODE batches (need ≥3, got {n_total}).")
 
-        X = np.column_stack([B_arr, K_arr, np.ones_like(B_arr)])
-        delta, epsilon, d = self._linfit(X, T_arr)
+        if len(eager_T) >= 3:
+            B = np.asarray(eager_B, dtype=float); K = np.asarray(eager_K, dtype=float); T = np.asarray(eager_T, dtype=float)
+            X = np.column_stack([B, K, np.ones_like(B)])
+            d, e, off = self._linfit(X, T)
+            self._eager_params = DecodeParams(delta=float(d), epsilon=float(e), d=float(off))
+            preds = X @ np.array([d, e, off])
+            self.eager_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        else:
+            print(f"[DecodeEstimator] eager regime has {len(eager_T)} samples (<3); keeping previous eager params")
 
-        self._params = DecodeParams(delta=float(delta), epsilon=float(epsilon), d=float(d))
+        if len(graph_T) >= 3:
+            B = np.asarray(graph_B, dtype=float); K = np.asarray(graph_K, dtype=float); T = np.asarray(graph_T, dtype=float)
+            X = np.column_stack([B, K, np.ones_like(B)])
+            d, e, off = self._linfit(X, T)
+            self._graph_params = DecodeParams(delta=float(d), epsilon=float(e), d=float(off))
+            preds = X @ np.array([d, e, off])
+            self.graph_fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        else:
+            if len(graph_T) > 0:
+                print(f"[DecodeEstimator] graph regime has {len(graph_T)} samples (<3); keeping previous graph params")
 
-        preds = X @ np.array([delta, epsilon, d])
-        self.fit_rmse = float(np.sqrt(np.mean((preds - T_arr) ** 2)))
-        return self._params
+        print(
+            f"[DecodeEstimator] fit: eager={len(eager_T)} samples "
+            f"(rmse={self.eager_fit_rmse}), graph={len(graph_T)} samples "
+            f"(rmse={self.graph_fit_rmse})"
+        )
+        return self._eager_params, self._graph_params

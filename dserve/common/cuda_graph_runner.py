@@ -74,6 +74,10 @@ class CudaGraphRunner:
         # delta across each capture call. Used to log totals.
         self._decode_graph_bytes: Dict[Tuple[int, int], int] = {}
         self._prefill_graph_bytes: Dict[Tuple[int, int], int] = {}
+        # Buckets newly captured since the last `pop_pending_*_captures()` call.
+        # The manager polls these to keep its GraphEligibility mirror in sync.
+        self._pending_decode_captures: list = []
+        self._pending_prefill_captures: list = []
         self._warmup_iters = 3
 
     def total_decode_graph_bytes(self) -> int:
@@ -87,6 +91,27 @@ class CudaGraphRunner:
 
     def num_prefill_graphs(self) -> int:
         return len(self._prefill_cache)
+
+    def all_decode_buckets(self) -> list:
+        """Snapshot of all currently captured decode bucket keys (for mirror seeding)."""
+        return list(self._cache.keys())
+
+    def all_prefill_buckets(self) -> list:
+        """Snapshot of all currently captured prefill bucket keys (for mirror seeding)."""
+        return list(self._prefill_cache.keys())
+
+    def pop_pending_decode_captures(self) -> list:
+        """Drain & return decode bucket keys captured since last call. Manager-side
+        GraphEligibility mirror appends these on each scheduler iteration."""
+        out = self._pending_decode_captures
+        self._pending_decode_captures = []
+        return out
+
+    def pop_pending_prefill_captures(self) -> list:
+        """Drain & return prefill bucket keys captured since last call."""
+        out = self._pending_prefill_captures
+        self._pending_prefill_captures = []
+        return out
 
     @staticmethod
     def get_batch_bucket(batch_size: int) -> int:
@@ -252,6 +277,7 @@ class CudaGraphRunner:
         }
 
         self._cache[cache_key] = (graph, input_buffers, static_output, ml_bucket)
+        self._pending_decode_captures.append(cache_key)
         torch.cuda.synchronize()
         self._decode_graph_bytes[cache_key] = torch.cuda.memory_allocated() - mem_before
         infer_state.mem_manager.page_table_lock.release()
@@ -463,6 +489,7 @@ class CudaGraphRunner:
                 'delta': static_delta,
             }
             self._prefill_cache[cache_key] = (graph, bufs, static_output, T_bucket)
+            self._pending_prefill_captures.append(cache_key)
             torch.cuda.synchronize()
             self._prefill_graph_bytes[cache_key] = torch.cuda.memory_allocated() - mem_before
             return static_output
