@@ -41,8 +41,9 @@ def kernel_bgmv(y: torch.Tensor , x: torch.Tensor, w: torch.Tensor, start_indici
     dispatch_bgmv(y, x, w, start_indicies, lora_ranks, loc_indicies, indicies, qkvo, lora_scales, w_ld, w_valid)
 
 class LoraUnorderedBatchMixed:
-    # Class-level shared runner (persists across engine instances)
+    # Class-level shared runners (persist across engine instances)
     _shared_cuda_graph_runner = None
+    _shared_piecewise_runner = None
 
     def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None,
                  enable_cuda_graph=False, enable_prefill_cuda_graph=False):
@@ -164,18 +165,27 @@ class LoraUnorderedBatchMixed:
         infer_state.b_loc_key = b_loc_key
         infer_state.b_loc_value = b_loc_value
 
-        # Decide CUDA graph path. Full-graph captures attention inside the graph
-        # and supports batch_size in {1, 2, 4, 8, 16, 32, 64} via padding.
-        # Prefill CG is gated off for any batch with active finetune tokens or
-        # an interrupt event in flight.
+        # Decide CUDA graph path.
+        #   - Piecewise (sglang-style): supports FT batches via eager save hooks
+        #     between graph segments. Enabled by DSERVE_PIECEWISE_PREFILL=1.
+        #   - Full-graph: captures attention; inference-only.
+        # Both paths support batch_size in {1, 2, 4, 8, 16, 32, 64}.
+        import os as _os
         has_ft = bool(torch.any(infer_state.finetune_mask))
-        use_prefill_cg = (
+        use_piecewise = (
             self.enable_prefill_cuda_graph
+            and _os.environ.get('DSERVE_PIECEWISE_PREFILL', '0') == '1'
+            and prefill_interrupt_event is None
+            and batch_size <= 64
+        )
+        use_prefill_cg = (
+            not use_piecewise
+            and self.enable_prefill_cuda_graph
             and not has_ft
             and prefill_interrupt_event is None
-            and batch_size <= 64  # bs_bucket support: {1, 2, 4, 8, 16, 32, 64}
+            and batch_size <= 64
         )
-        if use_prefill_cg:
+        if use_prefill_cg or use_piecewise:
             T_bucket = CudaGraphRunner.get_prefill_token_bucket(total_token_num)
             alloc_size = T_bucket
         else:
@@ -197,6 +207,11 @@ class LoraUnorderedBatchMixed:
         infer_state.prefill_value_buffer = torch.empty(
                 (alloc_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
+
+        if use_piecewise:
+            return self._prefill_with_piecewise_cuda_graph(
+                batch_size, total_token_num, input_ids, infer_state,
+                self.batch_req_bins, no_lora_compute)
 
         if use_prefill_cg:
             return self._prefill_with_cuda_graph(
@@ -301,6 +316,117 @@ class LoraUnorderedBatchMixed:
                 input_ids, infer_state, real_batch_req_bins, forward_kwargs)
         # logits is bs_bucket-sized; the caller expects exactly batch_size rows.
         return logits[:batch_size]
+
+    def _prefill_with_piecewise_cuda_graph(self, batch_size, total_token_num,
+                                            input_ids, infer_state, real_batch_req_bins,
+                                            no_lora_compute=False):
+        """Capture or replay a PIECEWISE prefill graph (sglang-style) with FT hooks.
+
+        Per layer: 3 graph segments (pre_attn / post_attn_resid / ffn).
+        Eager hooks between segments handle dynamic-shape work:
+          - save_embedding_output (FT only)        — runs after pre_infer
+          - save_FFN_INPUT_ACTIVATION (FT only)    — runs after post_attn_resid
+          - save_ATTENTION_INPUT_ACTIVATION (FT)   — runs after ffn
+
+        Post-infer (FT-aware finetune logits + last-token logits) runs eagerly
+        on the final input_embs since it has per-request Python work that
+        a single static graph cannot represent.
+        """
+        from dserve.common.cuda_graph_runner import PiecewiseCudaGraphRunner
+        if LoraUnorderedBatchMixed._shared_piecewise_runner is None:
+            LoraUnorderedBatchMixed._shared_piecewise_runner = PiecewiseCudaGraphRunner(
+                max_total_tokens=self.base_model.max_total_token_num if hasattr(self.base_model, 'max_total_token_num') else 25000,
+                num_layers=self.base_model.layers_num,
+                tp_q_head_num=self.base_model.tp_q_head_num_,
+                tp_k_head_num=self.base_model.tp_k_head_num_,
+                head_dim=self.base_model.head_dim_,
+                embed_dim=self.base_model.tp_q_head_num_ * self.base_model.head_dim_,
+            )
+        runner = LoraUnorderedBatchMixed._shared_piecewise_runner
+
+        base_model = self.base_model
+
+        def pre_infer_fn(input_ids_t, inf_state):
+            return base_model.pre_infer.context_forward(input_ids_t, inf_state, base_model.pre_post_weight)
+
+        def pre_attn_fn(layer_id, input_embs, inf_state, no_lc):
+            return self._pre_attn_piece(layer_id, input_embs, inf_state, no_lc)
+
+        def attention_fn(q, ck, cv, o_static, inf_state):
+            from dserve.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+            li = base_model.layers_infer[0]
+            q_view = q.view(-1, li.tp_q_head_num_, li.head_dim_)
+            k_view = ck.view(-1, li.tp_k_head_num_, li.head_dim_)
+            v_view = cv.view(-1, li.tp_v_head_num_, li.head_dim_)
+            o_view = o_static.view(-1, li.tp_q_head_num_, li.head_dim_)
+            context_attention_fwd(q_view, k_view, v_view, o_view,
+                                  inf_state.b_start_loc, inf_state.b_seq_len,
+                                  inf_state.max_len_in_batch)
+
+        def post_attn_resid_fn(layer_id, o, input_embs, inf_state, no_lc):
+            self._post_attn_residual_piece(layer_id, o, input_embs, inf_state, no_lc)
+
+        def ffn_fn(layer_id, input_embs, inf_state):
+            self._ffn_piece(layer_id, input_embs, inf_state)
+
+        # FT eager hooks. None when there is no FT in this batch.
+        has_ft = bool(torch.any(infer_state.finetune_mask))
+        save_emb_fn = None
+        save_ffn_in_fn = None
+        save_attn_in_fn = None
+        if has_ft:
+            ft_state = {'ffn_input_vpids': None, 'attn_input_vpids': None}
+            mm = infer_state.mem_manager
+            def save_emb_fn(input_embs, inf_state):
+                mm.save_embedding_output(input_embs, inf_state)
+            def save_ffn_in_fn(layer_id, input_embs, inf_state):
+                ft_state['ffn_input_vpids'] = mm.save_activations_by_layer(
+                    layer_id, input_embs, inf_state,
+                    PageType.FFN_INPUT_ACTIVATION, ft_state['ffn_input_vpids'])
+            def save_attn_in_fn(layer_id, input_embs, inf_state):
+                ft_state['attn_input_vpids'] = mm.save_activations_by_layer(
+                    layer_id, input_embs, inf_state,
+                    PageType.ATTENTION_INPUT_ACTIVATION, ft_state['attn_input_vpids'])
+
+        # Set max_len_in_batch to real value for eager attention.
+        infer_state.max_len_in_batch = int(infer_state.b_seq_len.max().item())
+
+        if not runner.has_graph(batch_size, total_token_num):
+            runner.capture(self, batch_size, total_token_num,
+                           input_ids, infer_state, real_batch_req_bins,
+                           pre_infer_fn, pre_attn_fn, attention_fn,
+                           post_attn_resid_fn, ffn_fn, no_lora_compute)
+            # The capture pass already ran the forward once on input_ids;
+            # but we did NOT run the FT eager hooks during capture. Do a
+            # full replay now to get correct logits + saved activations.
+
+        state = runner.replay(self, batch_size, total_token_num,
+                              input_ids, infer_state, real_batch_req_bins,
+                              attention_fn, save_emb_fn, save_ffn_in_fn, save_attn_in_fn)
+
+        # Post-infer (eager) on the final input_embs in the static buffer.
+        # Slice padded b_start_loc/b_seq_len down to real batch_size — the
+        # post-infer code assumes len(b_seq_len) == batch_size.
+        input_embs = state['input_embs']
+        saved_b_start_loc = infer_state.b_start_loc
+        saved_b_seq_len = infer_state.b_seq_len
+        infer_state.b_start_loc = saved_b_start_loc[:batch_size]
+        infer_state.b_seq_len = saved_b_seq_len[:batch_size]
+        try:
+            if has_ft:
+                finetune_logits_per_request = []
+                predict_logics = self.base_model.post_infer.token_forward_with_finetune_outputs(
+                    input_embs, finetune_logits_per_request, infer_state, self.base_model.pre_post_weight)
+                if torch.any(infer_state.finetune_mask):
+                    infer_state.mem_manager.write_to_logit_tensor(
+                        finetune_logits_per_request,
+                        ft_state['ffn_input_vpids'], ft_state['attn_input_vpids'])
+            else:
+                predict_logics = self._post_infer_inference_only(input_embs, infer_state)
+        finally:
+            infer_state.b_start_loc = saved_b_start_loc
+            infer_state.b_seq_len = saved_b_seq_len
+        return predict_logics[:batch_size]
 
     def _prefill_padded_no_graph(self, batch_size, total_token_num, input_ids,
                                   infer_state, real_batch_req_bins, forward_kwargs):
@@ -411,6 +537,40 @@ class LoraUnorderedBatchMixed:
         o = self._lora_get_o(layer_id, o, infer_state, no_lora_compute)
         input_embs.add_(o.view(-1, layer_infer.embed_dim_))
         return
+
+    # ─── Piecewise pieces (for sglang-style FT prefill graph) ──────────────
+    # Split _lora_context_attention + _context_ffn at three points:
+    #     pre_attn → eager attention → post_attn_residual → eager save_FFN_INPUT
+    #              → ffn → eager save_ATTENTION_INPUT
+    # Each piece has a static-shape graph; eager calls between pieces handle
+    # boolean-indexed save_activations_by_layer (which has dynamic shape).
+    def _pre_attn_piece(self, layer_id, input_embs, infer_state, no_lora_compute=False):
+        """Static piece: RMSNorm → QKV+LoRA → rotary → destindex_copy_kv.
+        Returns (q, cache_k, cache_v); cache_k/v alias prefill_key/value_buffer.
+        """
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        layer_infer = self.base_model.layers_infer[layer_id]
+        input1 = layer_infer._att_norm(input_embs, infer_state, layer_weight)
+        cache_k, cache_v = layer_infer._pre_cache_kv(infer_state, layer_weight)
+        q = self._lora_get_qkv(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
+        layer_infer._post_cache_kv(cache_k, cache_v, infer_state, layer_weight)
+        return q, cache_k, cache_v
+
+    def _post_attn_residual_piece(self, layer_id, o, input_embs, infer_state, no_lora_compute=False):
+        """Static piece: O projection + LoRA O → residual add into input_embs.
+        Stops before FFN so FT save_FFN_INPUT_ACTIVATION can run eagerly between.
+        """
+        layer_infer = self.base_model.layers_infer[layer_id]
+        o_out = self._lora_get_o(layer_id, o, infer_state, no_lora_compute)
+        input_embs.add_(o_out.view(-1, layer_infer.embed_dim_))
+        return input_embs
+
+    def _ffn_piece(self, layer_id, input_embs, infer_state):
+        """Static piece: FFN_norm + gate/up/silu/down + residual."""
+        layer_infer = self.base_model.layers_infer[layer_id]
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        layer_infer._context_ffn(input_embs, infer_state, layer_weight)
+        return input_embs
 
     def _lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False)->torch.Tensor:
         base_model = self.base_model

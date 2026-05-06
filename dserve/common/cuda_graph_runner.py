@@ -567,3 +567,356 @@ class CudaGraphRunner:
         self._prefill_graph_bytes.clear()
 
 
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Piecewise CUDA Graph Runner (sglang-style, with FT hooks)
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Splits each transformer layer at attention AND at FFN boundaries:
+#
+#     input_embs (static buffer)
+#       └─ pre_attn_graph[i]:  RMSNorm + Q/K/V + LoRA + rotary + destindex_copy_kv
+#       └─ eager attention:    context_attention_fwd(q, k, v, o_static, ...)
+#       └─ post_attn_resid[i]: O proj + LoRA + residual add
+#       └─ eager save FFN_INPUT_ACTIVATION (for FT only; no-op if no FT)
+#       └─ ffn_graph[i]:       RMSNorm + gate/up/silu/down + residual add
+#       └─ eager save ATTENTION_INPUT_ACTIVATION (for FT only)
+#
+# Eager calls between graph segments handle dynamic-shape work (boolean mask
+# indexing into input_embs[finetune_mask], mem-pool alloc, etc.) which a
+# captured CUDA graph cannot represent.
+#
+# Cache key: (bs_bucket, T_bucket).
+# Per bucket: 3*L sub-graphs (pre_attn, post_attn_resid, ffn) + pre_infer.
+# Post-infer (FT-aware) runs eager — its per-request Python loop and
+# boolean indexing don't fit a single static graph.
+
+class PiecewiseCudaGraphRunner:
+    PREFILL_TOKEN_BUCKET_SIZE = 128
+    PREFILL_BS_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+
+    def __init__(self, max_total_tokens: int = 25000, num_layers: int = 32,
+                 tp_q_head_num: int = 32, tp_k_head_num: int = 8,
+                 head_dim: int = 128, embed_dim: int = 4096):
+        self.max_total_tokens = max_total_tokens
+        self.num_layers = num_layers
+        self.tp_q_head_num = tp_q_head_num
+        self.tp_k_head_num = tp_k_head_num
+        self.head_dim = head_dim
+        self.embed_dim = embed_dim
+        self._cache: Dict[Tuple[int, int], dict] = {}
+
+    @staticmethod
+    def get_token_bucket(total_token_num: int) -> int:
+        bs = PiecewiseCudaGraphRunner.PREFILL_TOKEN_BUCKET_SIZE
+        return ((total_token_num + bs - 1) // bs) * bs
+
+    @staticmethod
+    def get_bs_bucket(batch_size: int) -> int:
+        for b in PiecewiseCudaGraphRunner.PREFILL_BS_BUCKETS:
+            if batch_size <= b:
+                return b
+        return batch_size
+
+    def get_cache_key(self, batch_size: int, total_token_num: int) -> Tuple[int, int]:
+        return (self.get_bs_bucket(batch_size),
+                self.get_token_bucket(total_token_num))
+
+    def has_graph(self, batch_size: int, total_token_num: int) -> bool:
+        return self.get_cache_key(batch_size, total_token_num) in self._cache
+
+    def capture(self, engine, batch_size: int, total_token_num: int,
+                input_ids, infer_state, batch_req_bins,
+                pre_infer_fn, pre_attn_fn, attention_fn,
+                post_attn_resid_fn, ffn_fn,
+                no_lora_compute: bool = False) -> dict:
+        """Capture all sub-graphs for the given bucket. Returns the bufs dict.
+
+        The fns are bound engine methods (or wrappers):
+          pre_infer_fn(input_ids, infer_state) -> input_embs (graph-allocated)
+          pre_attn_fn(layer_id, input_embs, infer_state, no_lora_compute)
+              -> (q, cache_k, cache_v); cache_k/v alias prefill_key/value_buffer
+          attention_fn(q, cache_k, cache_v, o_static, infer_state) — eager
+          post_attn_resid_fn(layer_id, o, input_embs, infer_state, no_lora_compute)
+          ffn_fn(layer_id, input_embs, infer_state)
+        """
+        infer_state.mem_manager.page_table_lock.acquire()
+        try:
+            T_bucket = self.get_token_bucket(total_token_num)
+            bs_bucket = self.get_bs_bucket(batch_size)
+            key = (bs_bucket, T_bucket)
+
+            # ── Static buffers shared across all sub-graphs ──
+            static_input_ids = torch.zeros(T_bucket, dtype=input_ids.dtype, device="cuda")
+            static_input_ids[:total_token_num].copy_(input_ids)
+
+            pc = infer_state.position_cos
+            ps = infer_state.position_sin
+            static_position_cos = torch.zeros((T_bucket, pc.shape[1]), dtype=pc.dtype, device="cuda")
+            static_position_sin = torch.zeros((T_bucket, ps.shape[1]), dtype=ps.dtype, device="cuda")
+            static_position_cos[:total_token_num].copy_(pc)
+            static_position_sin[:total_token_num].copy_(ps)
+
+            static_b_start_loc = torch.zeros(bs_bucket, dtype=infer_state.b_start_loc.dtype, device="cuda")
+            static_b_seq_len = torch.zeros(bs_bucket, dtype=infer_state.b_seq_len.dtype, device="cuda")
+            static_b_start_loc[:batch_size].copy_(infer_state.b_start_loc)
+            static_b_seq_len[:batch_size].copy_(infer_state.b_seq_len)
+            if batch_size < bs_bucket:
+                static_b_start_loc[batch_size:].fill_(int(total_token_num))
+
+            static_batch_req_bins = torch.zeros(T_bucket, dtype=batch_req_bins.dtype, device="cuda")
+            static_batch_req_bins[:total_token_num].copy_(batch_req_bins)
+
+            # KV mem indices already T_bucket-sized (allocated in _prefill).
+            mk = infer_state.prefill_mem_index_key
+            mv = infer_state.prefill_mem_index_value
+            assert mk.shape[0] == T_bucket
+            static_mem_index_key = mk.clone()
+            static_mem_index_value = mv.clone()
+            static_mem_index_cat = torch.cat([static_mem_index_key, static_mem_index_value], dim=0)
+
+            static_prefill_key_buffer = torch.empty(
+                (T_bucket, self.tp_k_head_num, self.head_dim),
+                dtype=torch.float16, device="cuda")
+            static_prefill_value_buffer = torch.empty(
+                (T_bucket, self.tp_k_head_num, self.head_dim),
+                dtype=torch.float16, device="cuda")
+
+            # b_loc padded to bs_bucket
+            static_b_loc_key = torch.zeros(
+                (bs_bucket, infer_state.b_loc_key.shape[1]),
+                dtype=infer_state.b_loc_key.dtype, device="cuda")
+            static_b_loc_value = torch.zeros(
+                (bs_bucket, infer_state.b_loc_value.shape[1]),
+                dtype=infer_state.b_loc_value.dtype, device="cuda")
+            static_b_loc_key[:batch_size].copy_(infer_state.b_loc_key)
+            static_b_loc_value[:batch_size].copy_(infer_state.b_loc_value)
+
+            # FT mask flows through eager save() calls — keep the existing
+            # one on infer_state. We DON'T set the captured graph's
+            # finetune_mask to anything; eager saves read infer_state directly.
+            # But the runner needs a static buffer to copy into per-replay.
+            static_finetune_mask = torch.zeros(T_bucket, dtype=torch.bool, device="cuda")
+
+            # O scratch buffer (shared across layers — each layer's eager
+            # attention writes here, post_attn_resid reads here).
+            static_o = torch.empty(
+                (T_bucket, self.tp_q_head_num, self.head_dim),
+                dtype=torch.float16, device="cuda")
+
+            # LoRA delta scratch sized to T_bucket
+            max_lora_dim = engine.max_lora_dim
+            static_delta = [
+                torch.zeros((T_bucket, max_lora_dim), dtype=torch.float16, device="cuda")
+                for _ in range(3)
+            ]
+
+            # Wire static buffers into infer_state and engine
+            infer_state.b_start_loc = static_b_start_loc
+            infer_state.b_seq_len = static_b_seq_len
+            infer_state.position_cos = static_position_cos
+            infer_state.position_sin = static_position_sin
+            infer_state.prefill_mem_index_key = static_mem_index_key
+            infer_state.prefill_mem_index_value = static_mem_index_value
+            infer_state.prefill_mem_index_cat = static_mem_index_cat
+            infer_state.prefill_key_buffer = static_prefill_key_buffer
+            infer_state.prefill_value_buffer = static_prefill_value_buffer
+            infer_state.b_loc_key = static_b_loc_key
+            infer_state.b_loc_value = static_b_loc_value
+            infer_state.finetune_mask = static_finetune_mask
+            infer_state.total_token_num = T_bucket
+            infer_state.max_len_in_batch = int(total_token_num)
+            engine.batch_req_bins = static_batch_req_bins
+            engine.delta = static_delta
+
+            # ── Warmup all pieces once on side stream ──
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                input_embs_tmp = pre_infer_fn(static_input_ids, infer_state)
+                for i in range(self.num_layers):
+                    q_i, ck_i, cv_i = pre_attn_fn(i, input_embs_tmp, infer_state, no_lora_compute)
+                    attention_fn(q_i, ck_i, cv_i, static_o, infer_state)
+                    post_attn_resid_fn(i, static_o, input_embs_tmp, infer_state, no_lora_compute)
+                    ffn_fn(i, input_embs_tmp, infer_state)
+            torch.cuda.current_stream().wait_stream(s)
+
+            # ── Capture pre_infer ──
+            pre_infer_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(pre_infer_graph, pool=_get_forward_graph_pool()):
+                input_embs_static = pre_infer_fn(static_input_ids, infer_state)
+            pre_infer_graph.replay()
+            torch.cuda.current_stream().synchronize()
+
+            # ── Per-layer captures ──
+            pre_attn_graphs = []
+            pre_attn_outputs = []  # list of (q, ck, cv) tensor handles
+            post_attn_resid_graphs = []
+            ffn_graphs = []
+            for i in range(self.num_layers):
+                # pre_attn[i]: writes to ephemeral q (graph-pool alloc), and to
+                # cache_k = prefill_key_buffer (already static), cache_v likewise.
+                g_pre = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_pre, pool=_get_forward_graph_pool()):
+                    q_i, ck_i, cv_i = pre_attn_fn(i, input_embs_static, infer_state, no_lora_compute)
+                g_pre.replay()
+                torch.cuda.current_stream().synchronize()
+                pre_attn_graphs.append(g_pre)
+                pre_attn_outputs.append((q_i, ck_i, cv_i))
+
+                # Eager attention so post_attn_resid captures with consistent o_static.
+                attention_fn(q_i, ck_i, cv_i, static_o, infer_state)
+
+                # post_attn_residual[i]: reads o_static, writes input_embs_static
+                g_post_resid = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_post_resid, pool=_get_forward_graph_pool()):
+                    post_attn_resid_fn(i, static_o, input_embs_static, infer_state, no_lora_compute)
+                g_post_resid.replay()
+                torch.cuda.current_stream().synchronize()
+                post_attn_resid_graphs.append(g_post_resid)
+
+                # ffn[i]: reads input_embs_static, writes input_embs_static
+                g_ffn = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_ffn, pool=_get_forward_graph_pool()):
+                    ffn_fn(i, input_embs_static, infer_state)
+                g_ffn.replay()
+                torch.cuda.current_stream().synchronize()
+                ffn_graphs.append(g_ffn)
+
+            self._cache[key] = {
+                'input_ids': static_input_ids,
+                'position_cos': static_position_cos,
+                'position_sin': static_position_sin,
+                'b_start_loc': static_b_start_loc,
+                'b_seq_len': static_b_seq_len,
+                'batch_req_bins': static_batch_req_bins,
+                'prefill_mem_index_key': static_mem_index_key,
+                'prefill_mem_index_value': static_mem_index_value,
+                'prefill_mem_index_cat': static_mem_index_cat,
+                'prefill_key_buffer': static_prefill_key_buffer,
+                'prefill_value_buffer': static_prefill_value_buffer,
+                'b_loc_key': static_b_loc_key,
+                'b_loc_value': static_b_loc_value,
+                'finetune_mask': static_finetune_mask,
+                'delta': static_delta,
+                'input_embs': input_embs_static,
+                'o_static': static_o,
+                'pre_infer_graph': pre_infer_graph,
+                'pre_attn_graphs': pre_attn_graphs,
+                'pre_attn_outputs': pre_attn_outputs,
+                'post_attn_resid_graphs': post_attn_resid_graphs,
+                'ffn_graphs': ffn_graphs,
+                'bs_bucket': bs_bucket,
+                'T_bucket': T_bucket,
+            }
+            return self._cache[key]
+        finally:
+            infer_state.mem_manager.page_table_lock.release()
+
+    def replay(self, engine, batch_size: int, total_token_num: int,
+               input_ids, infer_state, batch_req_bins,
+               attention_fn,
+               save_embedding_fn=None,
+               save_ffn_input_fn=None,
+               save_attention_input_fn=None) -> dict:
+        """Replay sub-graphs in sequence with eager hooks between them.
+
+        save_*_fn callbacks (each taking (layer_id, input_embs, infer_state) for
+        per-layer ones, or (input_embs, infer_state) for embedding) run eagerly
+        between graphs. Pass None for inference-only (no FT saves).
+
+        Returns the bufs dict so the caller can run post-infer (FT-aware
+        finetune_logits projection) eagerly on the final input_embs.
+        """
+        key = self.get_cache_key(batch_size, total_token_num)
+        state = self._cache[key]
+        bs_bucket = state['bs_bucket']
+        T_bucket = state['T_bucket']
+
+        # ── Copy fresh inputs into static buffers ──
+        # If the caller (e.g. capture path immediately followed by replay) has
+        # already wired infer_state to the static buffers, the source and
+        # destination of these copies alias and torch raises. Detect and skip.
+        def _safe_copy(dst_slice, src_tensor):
+            if dst_slice.data_ptr() == src_tensor.data_ptr():
+                return
+            dst_slice.copy_(src_tensor)
+
+        state['input_ids'][total_token_num:].zero_()
+        _safe_copy(state['input_ids'][:total_token_num], input_ids)
+
+        state['position_cos'][total_token_num:].zero_()
+        _safe_copy(state['position_cos'][:total_token_num], infer_state.position_cos)
+        state['position_sin'][total_token_num:].zero_()
+        _safe_copy(state['position_sin'][:total_token_num], infer_state.position_sin)
+
+        if state['b_start_loc'].data_ptr() != infer_state.b_start_loc.data_ptr():
+            state['b_start_loc'].zero_()
+            state['b_seq_len'].zero_()
+            state['b_start_loc'][:batch_size].copy_(infer_state.b_start_loc)
+            state['b_seq_len'][:batch_size].copy_(infer_state.b_seq_len)
+            if batch_size < bs_bucket:
+                state['b_start_loc'][batch_size:].fill_(int(total_token_num))
+
+        state['batch_req_bins'][total_token_num:].zero_()
+        _safe_copy(state['batch_req_bins'][:total_token_num], batch_req_bins)
+
+        if state['prefill_mem_index_key'].data_ptr() != infer_state.prefill_mem_index_key.data_ptr():
+            state['prefill_mem_index_key'].copy_(infer_state.prefill_mem_index_key)
+            state['prefill_mem_index_value'].copy_(infer_state.prefill_mem_index_value)
+        state['prefill_mem_index_cat'][:T_bucket].copy_(state['prefill_mem_index_key'])
+        state['prefill_mem_index_cat'][T_bucket:].copy_(state['prefill_mem_index_value'])
+
+        if state['b_loc_key'].data_ptr() != infer_state.b_loc_key.data_ptr():
+            state['b_loc_key'].zero_()
+            state['b_loc_value'].zero_()
+            state['b_loc_key'][:batch_size].copy_(infer_state.b_loc_key)
+            state['b_loc_value'][:batch_size].copy_(infer_state.b_loc_value)
+
+        # FT mask: real values in [:total_token_num], zero elsewhere.
+        if hasattr(infer_state, 'finetune_mask') and infer_state.finetune_mask is not None:
+            if state['finetune_mask'].data_ptr() != infer_state.finetune_mask.data_ptr():
+                state['finetune_mask'].zero_()
+                state['finetune_mask'][:total_token_num].copy_(infer_state.finetune_mask[:total_token_num])
+        else:
+            state['finetune_mask'].zero_()
+
+        # Rewire infer_state + engine to the static buffers.
+        infer_state.b_start_loc = state['b_start_loc']
+        infer_state.b_seq_len = state['b_seq_len']
+        infer_state.position_cos = state['position_cos']
+        infer_state.position_sin = state['position_sin']
+        infer_state.prefill_mem_index_key = state['prefill_mem_index_key']
+        infer_state.prefill_mem_index_value = state['prefill_mem_index_value']
+        infer_state.prefill_mem_index_cat = state['prefill_mem_index_cat']
+        infer_state.prefill_key_buffer = state['prefill_key_buffer']
+        infer_state.prefill_value_buffer = state['prefill_value_buffer']
+        infer_state.b_loc_key = state['b_loc_key']
+        infer_state.b_loc_value = state['b_loc_value']
+        infer_state.finetune_mask = state['finetune_mask']
+        infer_state.total_token_num = T_bucket
+        infer_state.max_len_in_batch = int(total_token_num)
+        engine.batch_req_bins = state['batch_req_bins']
+        engine.delta = state['delta']
+
+        input_embs = state['input_embs']
+
+        # ── Drive the pieces ──
+        state['pre_infer_graph'].replay()
+        if save_embedding_fn is not None:
+            save_embedding_fn(input_embs, infer_state)
+        for i in range(self.num_layers):
+            state['pre_attn_graphs'][i].replay()
+            q_i, ck_i, cv_i = state['pre_attn_outputs'][i]
+            attention_fn(q_i, ck_i, cv_i, state['o_static'], infer_state)
+            state['post_attn_resid_graphs'][i].replay()
+            if save_ffn_input_fn is not None:
+                save_ffn_input_fn(i, input_embs, infer_state)
+            state['ffn_graphs'][i].replay()
+            if save_attention_input_fn is not None:
+                save_attention_input_fn(i, input_embs, infer_state)
+        return state
+
+    def reset(self):
+        self._cache.clear()
