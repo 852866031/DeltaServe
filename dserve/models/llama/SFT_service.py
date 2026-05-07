@@ -131,14 +131,13 @@ class LlamaSFTBackwardService():
                     try:
                         self.receive_requests_info(msg)
                         current_epoch = msg["current_epoch"]
-                        bwd_print(f"Received activations. Starting backward...")
+                        #bwd_print(f"Received activations. Starting backward...")
                         self.working = True
                         self._maybe_pause()
                         with torch.cuda.stream(self.bwd_stream):
                             start = time.time()
                             ok, loss, ntok = self._run_bwd()
                             #torch.cuda.synchronize()
-                            bwd_print(f"[BWD Process] Backward Time: {(time.time()-start)*1000.0:.2f} ms")
                             self._maybe_pause()
                             self.finetuning_optimizer.step()
                             self.finetuning_optimizer.zero_grad(set_to_none=True)
@@ -148,7 +147,7 @@ class LlamaSFTBackwardService():
                             self.send_pipe.send((ok, loss, ntok))
                         self.working = False
                         self.total_processed_tokens += ntok
-                        bwd_print(f"Backward completed, duration {(time.time()-start)*1000.0:.2f} ms, total tokens processed: {self.total_processed_tokens}, loss: {loss:.6f}")
+                        bwd_print(f"Backward completed. Total tokens processed: {self.total_processed_tokens}, loss: {loss:.6f}")
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()

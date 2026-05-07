@@ -25,6 +25,7 @@ class BatchExecutionTracker():
         self.execution_type_list = []
         self.execution_duration_list = []
         self.predicted_duration_list = []
+        self.was_graph_list: List[Optional[bool]] = []
         self.timestamp_list = []
         self.last_refit_count = 0
     
@@ -45,24 +46,34 @@ class BatchExecutionTracker():
         execution_type: BatchExecutionType,
         execution_duration: float,
         predicted_duration: Optional[float] = None,
+        was_graph: Optional[bool] = None,
     ) -> None:
+        """`was_graph` is the regime that was *actually* in effect when this
+        batch ran (mirror state at dispatch time). Stored verbatim so that
+        `data_fit` doesn't reclassify the sample later — once a bucket is
+        captured the mirror flips True for all later runs of that shape, but
+        the historical sample's regime never changes. None means "unknown,
+        fall back to mirror lookup at fit time" (used by offline profiling
+        where the mirror isn't seeded yet)."""
         self.timestamp_list.append(time.time())
         self.inference_tokens_list.append(inference_tokens)
         self.finetuning_tokens_list.append(finetuning_tokens)
         self.execution_type_list.append(execution_type)
         self.execution_duration_list.append(execution_duration)
         self.predicted_duration_list.append(predicted_duration)
-    
+        self.was_graph_list.append(was_graph)
+
     def drop_batch_stats(self, index: int) -> None:
         """Drop the batch statistics at the specified index."""
         if index < 0 or index >= len(self.execution_type_list):
             raise IndexError("Index out of range")
-        
+
         del self.inference_tokens_list[index]
         del self.finetuning_tokens_list[index]
         del self.execution_type_list[index]
         del self.execution_duration_list[index]
         del self.predicted_duration_list[index]
+        del self.was_graph_list[index]
     
     def size(self) -> int:
         """Return the number of recorded batches."""
@@ -514,11 +525,12 @@ class PrefillExecutionEstimator:
 
         n_total_seen = 0
 
-        for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration in zip(
+        for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration, stamped_was_graph in zip(
             tracker.inference_tokens_list,
             tracker.finetuning_tokens_list,
             tracker.execution_type_list,
             tracker.execution_duration_list,
+            tracker.was_graph_list,
         ):
             if exec_type != BatchExecutionType.PREFILL:
                 continue
@@ -540,12 +552,19 @@ class PrefillExecutionEstimator:
             T_in = float(np.sum(n_total))
             T_ft = float(np.sum(n_ft)) if n_ft.size else 0.0
 
-            # Decide regime
-            is_graph = False
-            if not has_ft and eligibility is not None:
+            # Decide regime: prefer the at-execution-time stamp; only fall
+            # back to the current mirror for legacy / offline-profiling
+            # samples that didn't record one.
+            if has_ft:
+                is_graph = False
+            elif stamped_was_graph is not None:
+                is_graph = bool(stamped_was_graph)
+            elif eligibility is not None:
                 bs = int(n_inf.size)
                 total = int(np.sum(n_inf))
                 is_graph = bool(eligibility.will_prefill_use_graph(False, bs, total))
+            else:
+                is_graph = False
 
             if is_graph:
                 graph_S.append(sum_n2)
@@ -703,11 +722,12 @@ class DecodeExecutionEstimator:
         eager_B, eager_K, eager_T = [], [], []
         graph_B, graph_K, graph_T = [], [], []
 
-        for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration in zip(
+        for inf_tokens_per_batch, ft_tokens_per_batch, exec_type, duration, stamped_was_graph in zip(
             tracker.inference_tokens_list,
             tracker.finetuning_tokens_list,
             tracker.execution_type_list,
             tracker.execution_duration_list,
+            tracker.was_graph_list,
         ):
             if exec_type != BatchExecutionType.DECODE:
                 continue
@@ -723,12 +743,15 @@ class DecodeExecutionEstimator:
             B = len(n_inf)
             K = float(np.sum(n_inf))
 
-            # Decode bucket key uses the largest-per-request token count
-            # as max_len, mirroring `nopad_max_len_in_batch` at runtime.
+            # Decide regime: prefer the at-execution-time stamp; fall back
+            # to the current mirror only for samples without one.
             max_len = int(n_inf.max()) if n_inf.size > 0 else 0
-            is_graph = False
-            if eligibility is not None:
+            if stamped_was_graph is not None:
+                is_graph = bool(stamped_was_graph)
+            elif eligibility is not None:
                 is_graph = bool(eligibility.will_decode_use_graph(B, max_len))
+            else:
+                is_graph = False
 
             if is_graph:
                 graph_B.append(B); graph_K.append(K); graph_T.append(duration)

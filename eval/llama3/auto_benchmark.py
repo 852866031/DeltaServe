@@ -15,6 +15,7 @@ import asyncio
 import csv
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -206,27 +207,31 @@ def write_results_csv(path: str, rows: List[Tuple[int, float, float, str, Option
     print(f"[orchestrator] Wrote results CSV: {path}", flush=True)
 
 
+WARMUP_START_OFFSET_S = 1.0
+
+
 async def run_warmup_requests(
     server: str,
     base_model: str,
     lora_dir: str,
     warmup_rows: List[TimelineRow],
     stop_event: asyncio.Event,
-    warmup_duration_s: float = 2.0,
     request_timeout_s: float = 600.0,
 ) -> None:
     """
-    Warmup phase:
-    - Ignores row.timestamp_s
-    - Spreads requests uniformly over warmup_duration_s
-    - Waits for all to finish
-    - Warmup requests are NOT recorded to the output CSV
+    Warmup phase: replays the same timestamp-based schedule as the main
+    timeline, but with the first row's timestamp normalized to
+    WARMUP_START_OFFSET_S (so a first row at t=45s doesn't wait 45s).
+    Warmup requests are NOT recorded to the output CSV.
     """
     if not warmup_rows:
         return
 
     connector = aiohttp.TCPConnector(limit=0)
     timeout = aiohttp.ClientTimeout(total=request_timeout_s)
+
+    base_ts = min(r.timestamp_s for r in warmup_rows)
+    span = max(r.timestamp_s for r in warmup_rows) - base_ts
 
     async with aiohttp.ClientSession(
         headers={"User-Agent": "WarmupClient"},
@@ -235,13 +240,17 @@ async def run_warmup_requests(
     ) as session:
         t0 = time.monotonic()
         n = len(warmup_rows)
-        spacing = warmup_duration_s / max(n, 1)
+        print(
+            f"[orchestrator] Warmup: {n} requests following timeline "
+            f"(first at +{WARMUP_START_OFFSET_S:.2f}s, span {span:.2f}s)",
+            flush=True,
+        )
 
-        print(f"[orchestrator] Warmup: {n} requests over {warmup_duration_s:.2f}s", flush=True)
+        async def _run_one(row: TimelineRow) -> None:
+            target_rel = (row.timestamp_s - base_ts) + WARMUP_START_OFFSET_S
+            target_abs = t0 + target_rel
 
-        async def _run_one(slot: int, row: TimelineRow) -> None:
-            target = t0 + slot * spacing
-            delay = target - time.monotonic()
+            delay = target_abs - time.monotonic()
             if delay > 0:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=delay)
@@ -263,13 +272,14 @@ async def run_warmup_requests(
                 lora_dir=lora_dir,
                 max_new_tokens=row.max_new_tokens,
             )
-            print(
-                f"[warmup] idx={idx} t_rel={t_rel:.6f}s latency={latency:.6f}s status={status} "
-                f"ttft={ttft} avg_tbt={avg_tbt} worst_tbt={worst_tbt}",
-                flush=True,
-            )
+            if idx % 10 == 0:
+                print(
+                    f"[warmup] idx={idx} t_rel={t_rel:.6f}s latency={latency:.6f}s status={status} "
+                    f"ttft={ttft} avg_tbt={avg_tbt} worst_tbt={worst_tbt}",
+                    flush=True,
+                )
 
-        tasks = [asyncio.create_task(_run_one(i, row)) for i, row in enumerate(warmup_rows)]
+        tasks = [asyncio.create_task(_run_one(row)) for row in warmup_rows]
         await asyncio.gather(*tasks)
         print("[orchestrator] Warmup completed ✅", flush=True)
 
@@ -383,6 +393,8 @@ async def main() -> None:
     ap.add_argument("--timeline_csv", default=str(SCRIPT_DIR / "timeline_live.csv"))
     ap.add_argument("--loose", default=False, action="store_true")
     ap.add_argument("--tight", default=False, action="store_true")
+    ap.add_argument("--nutanix", default=False, action="store_true",
+                    help="Use timeline_nutanix.csv as the request schedule.")
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
     ap.add_argument("--lora_dir", default=str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"))
 
@@ -394,6 +406,13 @@ async def main() -> None:
     ap.add_argument("--decode_graph", action="store_true", default=False)     # decode  CUDA graph
     ap.add_argument("--prefill_graph", action="store_true", default=False)    # prefill CUDA graph
     ap.add_argument("--bwd_graph", action="store_true", default=False)        # backward CUDA graph
+    ap.add_argument("--graphs", action="store_true", default=False,
+                    help="Shorthand for --decode_graph --prefill_graph "
+                         "--bwd_graph (enables all three CUDA graphs).")
+    ap.add_argument("--fold", type=int, default=1,
+                    help="Subsample the timeline: send only every N-th request "
+                         "(those whose 0-indexed row_id is divisible by N). "
+                         "Default 1 (send all).")
     # packed_kv allocator. Default-on because GQA-packed paging is the
     # production allocator; pass --no_packed_kv to fall back to the
     # legacy "unified" path (e.g. for comparison runs).
@@ -423,27 +442,44 @@ async def main() -> None:
     ap.add_argument("--out_csv", default="timeline_results.csv")
 
     # warmup config
-    ap.add_argument("--warmup_count", type=int, default=100)
-    ap.add_argument("--warmup_duration_s", type=float, default=10.0)
+    ap.add_argument("--warmup_count", type=int, default=1000)
+    ap.add_argument("--warmup_duration_s", type=float, default=15.0)
     ap.add_argument("--warmup_rest_s", type=float, default=2.0)
 
     args = ap.parse_args()
 
-    if args.tight and args.loose:
-        ap.error("--tight and --loose are mutually exclusive")
+    shape_flags = sum(1 for f in (args.tight, args.loose, args.nutanix) if f)
+    if shape_flags > 1:
+        ap.error("--tight, --loose, and --nutanix are mutually exclusive")
     if args.alpaca and not args.packed_kv:
         ap.error("--alpaca implies the packed_kv allocator (the alpaca yaml "
                  "uses it); drop --no_packed_kv.")
     if args.alpaca and not args.co:
         ap.error("--alpaca requires --co (the alpaca yaml is a finetuning "
                  "config; without --co the no-finetune yaml is used instead).")
+    if args.fold < 1:
+        ap.error("--fold must be a positive integer")
+    if args.graphs:
+        args.decode_graph = True
+        args.prefill_graph = True
+        args.bwd_graph = True
     if args.loose:
         args.timeline_csv = str(SCRIPT_DIR / "timeline_loose.csv")
     elif args.tight:
         args.timeline_csv = str(SCRIPT_DIR / "timeline_tight.csv")
+    elif args.nutanix:
+        args.timeline_csv = str(SCRIPT_DIR / "timeline_nutanix.csv")
 
     timeline_rows = load_timeline_csv(args.timeline_csv)
     print(f"[orchestrator] Loaded {len(timeline_rows)} rows from {args.timeline_csv}", flush=True)
+    if args.fold > 1:
+        before = len(timeline_rows)
+        timeline_rows = [r for r in timeline_rows if r.row_id % args.fold == 0]
+        print(
+            f"[orchestrator] --fold {args.fold}: kept {len(timeline_rows)}/{before} rows "
+            f"(every {args.fold}-th request by row_id)",
+            flush=True,
+        )
     if timeline_rows:
         print(
             f"[orchestrator] Timeline range: {timeline_rows[0].timestamp_s:.6f}s -> {timeline_rows[-1].timestamp_s:.6f}s",
@@ -479,6 +515,8 @@ async def main() -> None:
         tags.append("tight")
     elif args.loose:
         tags.append("loose")
+    elif args.nutanix:
+        tags.append("nutanix")
    
     suffix = ("_" + "_".join(tags)) if tags else ""
 
@@ -619,9 +657,29 @@ async def main() -> None:
         if stop_event.is_set():
             return
 
-        # Warmup (first N rows, ignored timestamps)
-        warmup_count = max(0, min(args.warmup_count, len(timeline_rows)))
-        warmup_rows = timeline_rows[:warmup_count]
+        # Warmup row selection: take min of two caps starting from row 0:
+        #   (1) warmup_count rows
+        #   (2) all rows whose timestamp - first_ts <= warmup_duration_s
+        # The warmup itself replays those rows on the timeline schedule
+        # (with the first row normalized to WARMUP_START_OFFSET_S).
+        if timeline_rows and args.warmup_count > 0 and args.warmup_duration_s > 0:
+            base_ts = timeline_rows[0].timestamp_s
+            by_count = min(args.warmup_count, len(timeline_rows))
+            by_duration = 0
+            for r in timeline_rows:
+                if r.timestamp_s - base_ts <= args.warmup_duration_s:
+                    by_duration += 1
+                else:
+                    break
+            warmup_n = min(by_count, by_duration)
+        else:
+            warmup_n = 0
+        warmup_rows = timeline_rows[:warmup_n]
+        print(
+            f"[orchestrator] Warmup row selection: count_cap={args.warmup_count}, "
+            f"duration_cap={args.warmup_duration_s:.2f}s -> {len(warmup_rows)} rows",
+            flush=True,
+        )
 
         if warmup_rows:
             await run_warmup_requests(
@@ -630,7 +688,6 @@ async def main() -> None:
                 lora_dir=args.lora_dir,
                 warmup_rows=warmup_rows,
                 stop_event=stop_event,
-                warmup_duration_s=args.warmup_duration_s,
             )
             if stop_event.is_set():
                 return

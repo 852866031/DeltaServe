@@ -226,7 +226,6 @@ class LoraUnorderedBatchMixed:
             elif attention_input_vpids is not None:
                 vpids_to_free = attention_input_vpids
             if vpids_to_free is not None and vpids_to_free.numel() > 0:
-                print("Freeing vpids!")
                 infer_state.mem_manager.free(vpids_to_free)
                 self.infer_adapter.unpin_adapters_pages() 
                 self.base_model.mem_manager.reset_b_loc_kv(None, None)

@@ -40,7 +40,7 @@ memory:
   unified_mem_manager_max_size_gb: 4
   max_finetuning_tokens: 256
   unified_mem_manager_log_path: null
-  allocator: unified
+  allocator: auto       # GQA → packed_kv; MHA → unified (see allocator_factory)
 
 cuda_graph:
   enable_decode_cuda_graph: false

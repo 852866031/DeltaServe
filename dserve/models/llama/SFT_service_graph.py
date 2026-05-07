@@ -606,7 +606,7 @@ class GraphedBackwardRunner:
                 grad_transformer_out = svc._lora_context_backward(i, grad_transformer_out)
             return True, loss, total_tokens_to_process
 
-        if not self._warming_up:
+        if not self._warming_up and False:
             _graph_print(
                 f"Using CUDA graph size={self._s_max} for s_total={s_total}"
             )

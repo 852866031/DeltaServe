@@ -369,6 +369,15 @@ class RouterManager:
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"prefill #tokens: {batch.input_tokens()}")
         await self._init_batch(batch)
+        # Snapshot graph eligibility BEFORE dispatching the prefill — this is
+        # the regime the runner will actually execute in. If the bucket gets
+        # captured during this run, the mirror won't learn until the next
+        # _co_serving_step's pop_pending_captures, so this stamp correctly
+        # labels first-hit samples as eager (slow capture run) rather than
+        # graph (steady-state replay).
+        has_ft_stamp = bool(finetuning_tokens_list) and sum(finetuning_tokens_list) > 0
+        will_graph_stamp = self.graph_eligibility.will_prefill_use_graph(
+            has_ft_stamp, len(inference_tokens_list), sum(inference_tokens_list))
         prefill_start_time = time.time()
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id, self.prefill_interrupt_event) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -387,18 +396,14 @@ class RouterManager:
             earliest_arrival_time = batch.get_earliest_arrival_time()
             prefill_end_time = time.time()
             duration = prefill_end_time - prefill_start_time
-            # Logging-only prediction. has_ft is determined by whether
-            # finetuning_tokens_list is non-empty.
-            has_ft_log = bool(finetuning_tokens_list) and sum(finetuning_tokens_list) > 0
-            will_graph_log = self.graph_eligibility.will_prefill_use_graph(
-                has_ft_log, len(inference_tokens_list), sum(inference_tokens_list))
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
                 finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=duration,
                 predicted_duration=self.prefill_estimator.predict_inference(
-                    inference_tokens_list, will_use_graph=will_graph_log))
+                    inference_tokens_list, will_use_graph=will_graph_stamp),
+                was_graph=will_graph_stamp)
             batch.record_time_to_first_token(prefill_end_time)
             if earliest_arrival_time is not None:
                 if prefill_end_time - earliest_arrival_time <= self.req_queue.ttft_slo * 1.05:
@@ -441,6 +446,10 @@ class RouterManager:
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"decode #tokens: {batch.input_tokens()}")
         self.req_queue.update_counter(batch)
+        # Snapshot decode eligibility before dispatch (pre-capture mirror).
+        B_dec_stamp = len(inference_tokens_list)
+        ml_dec_stamp = max(inference_tokens_list) if inference_tokens_list else 0
+        will_graph_dec_stamp = self.graph_eligibility.will_decode_use_graph(B_dec_stamp, ml_dec_stamp)
         start_time = time.time()
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id, self.decode_step_count) for tp_rank in range(self.world_size)]
         try:
@@ -466,17 +475,15 @@ class RouterManager:
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
         duration = decode_end_time - start_time
         if self.decode_step_count < 8:
-            B_dec_log = len(inference_tokens_list)
             K_dec_log = sum(inference_tokens_list)
-            ml_dec_log = max(inference_tokens_list) if inference_tokens_list else 0
-            will_graph_dec_log = self.graph_eligibility.will_decode_use_graph(B_dec_log, ml_dec_log)
             self.batch_exec_tracker.add_batch_stats(
                 inference_tokens=inference_tokens_list,
                 finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=duration,
                 predicted_duration=self.decode_estimator.predict(
-                    K_dec_log, B_dec_log, will_use_graph=will_graph_dec_log)
+                    K_dec_log, B_dec_stamp, will_use_graph=will_graph_dec_stamp),
+                was_graph=will_graph_dec_stamp,
         )
         batch.record_token_time(decode_end_time)
         await self._handle_finish_req(batch, has_new_finished_req)
@@ -574,6 +581,10 @@ class RouterManager:
                     router_print("Received exit finetuning request.")
                     self.batch_exec_tracker.write_batch_prediction_stats_to_csv()
                     self.req_queue.stop_finetuning()
+                    self.backward_is_running = False
+                    await asyncio.sleep(0)
+                    self.req_queue.finetuning_manager.write_bwd_logs_csv()
+                    router_print("Backward subprocess shut down.")
                 else:
                     router_print("Received start finetuning request.")
                     self.req_queue.start_finetuning()

@@ -60,7 +60,7 @@ finetune:
   data_path: data/alpaca_1000_p95.txt
   lora_path: adapters/llama3-toy-lora-ft
   num_epochs: 12
-  learning_rate: 0.0001
+  learning_rate: 0.00001
   weight_decay: 0.01
   gamma: 0.9
   max_saved_finetuning_tokens: 256

@@ -186,15 +186,23 @@ class Mixed_ReqQueue:
         return False
 
     
-    def print_batch_layout(self, infer_tokens, ft_tokens, new_batch):
+    def print_batch_layout(self, infer_tokens, ft_tokens, new_batch, will_use_graph: bool):
         infer_tokens_count = sum(infer_tokens)
         ft_tokens_count = sum(ft_tokens)
         unused = self.batch_max_tokens - (infer_tokens_count + ft_tokens_count)
-        predicted_duration = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens)
-        earliest_arrival_time = new_batch.get_earliest_arrival_time()   
+        # Co-serve batches always go through the eager prefill path (the
+        # runtime gates the prefill graph off when has_ft). Inf-only
+        # batches use the regime captured by `will_use_graph`, which the
+        # caller computed once in `generate_new_batch`.
+        if ft_tokens_count > 0:
+            predicted_duration = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens)
+        else:
+            predicted_duration = self.prefill_estimator.predict_inference(
+                infer_tokens, will_use_graph=will_use_graph)
+        earliest_arrival_time = new_batch.get_earliest_arrival_time()
         text = "\033[34m[Forward Batch Constructor]: "
         text += f"[{infer_tokens_count} Infer | {ft_tokens_count} FT | {unused} unused] "
-        text += f"\n\tT(Predicted Prefill) = {predicted_duration:.3f}s"
+        text += f"\tT(Predicted Prefill) = {predicted_duration:.3f}s"
         if earliest_arrival_time is not None:
             predicted_longest_ttft = time.time() + predicted_duration - earliest_arrival_time
             text += f" | T(Predicted Worst TTFT) = {predicted_longest_ttft:.3f}s"
@@ -341,7 +349,16 @@ class Mixed_ReqQueue:
             can_run_list.extend(ft_list)
         if len(can_run_list) > 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
-            self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
+            # Eligibility check is the same value the runner will see at
+            # dispatch (no mirror updates between here and `_prefill_batch`
+            # within the same `_co_serving_step`). Computed once and passed
+            # into the print to avoid redoing the bucket lookup.
+            has_ft_now = sum(ft_tokens) > 0
+            will_graph_now = (
+                False if has_ft_now
+                else self._will_prefill_use_graph(False, len(infer_tokens), sum(infer_tokens))
+            )
+            self.print_batch_layout(infer_tokens, ft_tokens, new_batch, will_graph_now)
             #self.last_batch_time = time.time()
             #print(f"\033[32m[Batch Generation Time]: {time.time() - start:.4f} seconds\033[0m")
             return new_batch

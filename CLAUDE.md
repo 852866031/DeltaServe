@@ -310,10 +310,17 @@ Selected at startup via `cfg.memory.allocator` and dispatched through
 `free_bitmap` + `page_type_map` machinery from
 `dserve/common/unified_mem_allocator.py`.
 
-- **`unified`** (default): one page = one KV slot. For Llama-3 GQA each page
+- **`auto`** (default): `make_allocator` inspects the model's GQA factor
+  `F = num_attention_heads / num_key_value_heads` and picks `packed_kv`
+  when F > 1, `unified` when F == 1 (`_resolve_auto` in
+  `allocator_factory.py`). Llama-3 lands on `packed_kv`; Llama-1/2 on
+  `unified`. Logged at startup as
+  `[allocator_factory] memory.allocator='auto' → selected '...'`.
+- **`unified`**: one page = one KV slot. For Llama-3 GQA each page
   holds `[num_attention_heads=32, head_dim=128]` but only the first 8 head
   rows carry K (or V) data — the other 24 rows are zero padding. Simple, but
-  the KV portion of the pool is ~4× oversized for GQA.
+  the KV portion of the pool is ~4× oversized for GQA. Pick this explicitly
+  for legacy-comparison runs.
 - **`packed_kv`** (`dserve/common/packed_kv_mem_allocator.py`): subclass of
   `UnifiedMemoryAllocator` that packs `F = num_attention_heads /
   num_key_value_heads` (= 4 for Llama-3) KV sub-slots into each page. The
@@ -417,6 +424,7 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
   - `--decode_graph` / `--prefill_graph` / `--bwd_graph` — append
     `_decode` / `_prefill` / `_bwd` to the suffix and pass corresponding
     overrides to the launcher.
+  - `--all_graph` — convenience: turns on all three graph flags above.
   - `--packed_kv` (default on) / `--no_packed_kv` — controls whether the
     server uses the packed_kv allocator. Default-on appends `_kv` to the
     suffix and passes `--packed-kv` to the launcher; `--no_packed_kv`
@@ -429,9 +437,9 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
     to keep the `_kv` tag consistent with the actual allocator.
   - `--track_occupancy` — write `output/occupancy<suffix>.csv` (1 Hz
     sampling); passes `--occupancy_log` to the launcher.
-  - `--tight` / `--loose` — pick `timeline_tight.csv` or
-    `timeline_loose.csv` instead of the default `timeline_live.csv`;
-    appends `_tight` / `_loose` to the suffix. Mutually exclusive.
+  - `--tight` / `--loose` / `--nutanix` — pick the corresponding
+    `timeline_<shape>.csv` instead of the default `timeline_live.csv`;
+    appends the matching `_<shape>` to the suffix. Mutually exclusive.
 - `bwd_graph_plot.py` — compares two CSV runs (eager vs. graphed) on a 1×3
   layout: TTFT CDF, E2E latency over time (with avg annotation), cumulative
   finetuning tokens (with tok/s). Uses `drop_duplicates(subset="timestamp",
@@ -446,11 +454,20 @@ the bug that caused llama3 loss to plateau while llama1 trained fine.
   + all three graphs on). Looks up `_decode_prefill_bwd_kv_<shape>` (emotion)
   and `_decode_prefill_bwd_kv_alpaca_<shape>` (alpaca) for `<shape>` in
   {`tight`, `loose`} and emits one PNG per shape under `plots/`.
-- `plot_loose_tight.py` — single-trace 4-panel plots for one configuration
-  (no comparison overlay). Default `--suffix _decode_prefill_bwd_kv`;
-  emits `plots/loose_<config>.png` and `plots/tight_<config>.png` from
-  the corresponding `output/timeline_results<suffix>_<mode>.csv` and
-  `output/bwd_log<suffix>_<mode>.csv`.
+- `auto_plot.py` — single-trace 4-panel plots for one configuration across
+  every workload-shape variant (no comparison overlay). Default
+  `--suffix _decode_prefill_bwd_kv_alpaca` matches `--co --all_graph
+  --packed_kv --alpaca`; emits `plots/{loose,tight,nutanix}_<config>.png`
+  from the corresponding `output/timeline_results<suffix>_<mode>.csv` and
+  `output/bwd_log<suffix>_<mode>.csv`. Subplots: scheduled timeline | E2E
+  latency vs time | throughput tok/s (FT shaded under inference, black
+  total line) | rolling TTFT SLO satisfaction rate vs 95% target. The
+  satisfaction subplot's SLO threshold is auto-resolved from the YAML
+  matching the suffix (alpaca → `serving_config_finetuning_alpaca.yaml`,
+  kv → `serving_config_finetuning_packed.yaml`, else
+  `serving_config_finetuning.yaml`); override with `--slo` /
+  `--config-yaml`. `--window` tunes the rolling-window size. Modes whose
+  CSVs are missing are skipped with a warning.
 - `compare_occupancy_plot.py` — `(used_pages / total_pages)` over time,
   unified vs packed_kv, drives off the `occupancy<suffix>.csv` files
   emitted by `--track_occupancy`. Two-panel: occupancy % left, used pages
@@ -493,7 +510,7 @@ throughput. Read it first if you're investigating memory.
 | FFN graph size / token budget | `finetune.max_saved_finetuning_tokens` | The single fixed FFN graph shape |
 | Allocator buffer size | `memory.max_finetuning_tokens` | Shared activation/logit buffers |
 | Unified mem pool | `memory.unified_mem_manager_max_size_gb` | KV+activation pool capacity |
-| Allocator implementation | `memory.allocator` | `"unified"` (default, page=1 KV slot) or `"packed_kv"` (page=F KV sub-slots, GQA-packed) |
+| Allocator implementation | `memory.allocator` | `"auto"` (default — `packed_kv` for GQA, `unified` for MHA), `"unified"` (page=1 KV slot, GQA-unaware), `"packed_kv"` (page=F KV sub-slots) |
 | Occupancy tracker | `memory.unified_mem_manager_log_path` | If non-null, allocator daemon writes 1 Hz CSV of (used_pages, occupancy_pct). CPU-only, safe under graph capture. |
 | SLOs | `slo.{ttft_slo, avg_tbt_slo, max_tbt_slo}` | Scheduler trade-off thresholds (drive admission gates in `mixed_req_queue.py`) |
 | Scheduler | `scheduler.name` | Currently always `"dserve"` |

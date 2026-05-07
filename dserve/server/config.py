@@ -69,10 +69,16 @@ class MemorySection:
     unified_mem_manager_max_size_gb: int = 6
     max_finetuning_tokens: int = 1024
     unified_mem_manager_log_path: Optional[str] = None
-    # Allocator implementation. "unified" = page = 1 KV slot (current,
-    # GQA-unaware). "packed_kv" = page = F KV slots where F =
-    # num_attention_heads / num_key_value_heads (GQA-packed).
-    allocator: str = "unified"
+    # Allocator implementation:
+    #   "auto"      — pick based on the model's GQA factor (default).
+    #                 GQA (F > 1, e.g. Llama-3) → packed_kv; MHA (F == 1,
+    #                 e.g. Llama-1/2) → unified, since packed_kv is then
+    #                 byte-for-byte identical to unified anyway.
+    #   "unified"   — page = 1 KV slot (legacy, GQA-unaware; wastes ~F× KV pool).
+    #   "packed_kv" — page = F KV slots, F = num_attention_heads /
+    #                 num_key_value_heads. Force this to exercise the
+    #                 subclass on an MHA model for regression testing.
+    allocator: str = "auto"
 
 
 @dataclass
