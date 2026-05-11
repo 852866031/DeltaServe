@@ -57,7 +57,8 @@ class CudaGraphRunner:
                  tp_q_head_num: int = 32, tp_k_head_num: int = 8,
                  head_dim: int = 128,
                  embed_dim: int = 4096,
-                 b_loc_width: int = None):
+                 b_loc_width: int = None,
+                 max_graph_memory_bytes: Optional[int] = None):
         self.max_total_tokens = max_total_tokens
         self.num_layers = num_layers
         self.tp_q_head_num = tp_q_head_num
@@ -79,12 +80,49 @@ class CudaGraphRunner:
         self._pending_decode_captures: list = []
         self._pending_prefill_captures: list = []
         self._warmup_iters = 3
+        # Cap on combined decode+prefill graph memory. None or any
+        # negative value disables the cap (capture freely). Measured
+        # against `total_graph_bytes()` — the running sum of
+        # `_decode_graph_bytes` + `_prefill_graph_bytes`.
+        self._max_graph_memory_bytes: Optional[int] = (
+            None if (max_graph_memory_bytes is None or max_graph_memory_bytes < 0)
+            else int(max_graph_memory_bytes)
+        )
+        # One-time log when the cap first refuses a capture.
+        self._cap_warned: bool = False
 
     def total_decode_graph_bytes(self) -> int:
         return sum(self._decode_graph_bytes.values())
 
     def total_prefill_graph_bytes(self) -> int:
         return sum(self._prefill_graph_bytes.values())
+
+    def total_graph_bytes(self) -> int:
+        """Combined decode + prefill graph memory (bytes). Source of truth
+        for the cap and for the manager-side memory readout."""
+        return self.total_decode_graph_bytes() + self.total_prefill_graph_bytes()
+
+    def can_capture_more(self) -> bool:
+        """True iff the runtime is allowed to capture another graph.
+        False once `total_graph_bytes()` has reached the configured cap;
+        callers should fall back to eager forward in that case."""
+        if self._max_graph_memory_bytes is None:
+            return True
+        return self.total_graph_bytes() < self._max_graph_memory_bytes
+
+    def note_capture_refused(self) -> None:
+        """Hook for callers to record that a capture was skipped due to
+        the memory cap. Emits a one-time INFO log so the operator knows
+        the cap is now active."""
+        if not self._cap_warned:
+            self._cap_warned = True
+            cap_gb = (self._max_graph_memory_bytes or 0) / (1024.0 ** 3)
+            cur_gb = self.total_graph_bytes() / (1024.0 ** 3)
+            print(
+                f"[CudaGraphRunner] graph memory cap reached "
+                f"({cur_gb:.2f}/{cap_gb:.2f} GB); further runtime captures "
+                f"are disabled — uncaptured buckets will run eager."
+            )
 
     def num_decode_graphs(self) -> int:
         return len(self._cache)

@@ -40,9 +40,34 @@ from bwd_graph_plot import (
 )
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(_HERE, "output")
-PLOTS_DIR = os.path.join(_HERE, "plots")
-DEFAULT_TIMELINE_CSV = os.path.join(_HERE, "timeline_live.csv")
+
+
+def _detect_gpu_subdir() -> str:
+    """Return the timelines/ subdirectory name matching the local GPU.
+    Greps `nvidia-smi`; falls back to '5090' on failure."""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0,
+        )
+        name = (out.strip().splitlines() or [""])[0].upper()
+        if "A100" in name:
+            return "A100"
+        if "5090" in name:
+            return "5090"
+    except Exception:
+        pass
+    return "5090"
+
+
+_DEFAULT_GPU_SUBDIR = _detect_gpu_subdir()
+# This script now lives under llama3/scripts/, so output/, plots/, and
+# the timelines/ dir are one level up from _HERE.
+OUTPUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "output"))
+PLOTS_DIR = os.path.abspath(os.path.join(_HERE, "..", "plots"))
+DEFAULT_TIMELINE_CSV = os.path.abspath(os.path.join(
+    _HERE, "..", "timelines", _DEFAULT_GPU_SUBDIR, "timeline_live.csv"))
 
 BASELINE_LABEL = "no graph"
 BASELINE_COLOR = "tab:blue"

@@ -231,7 +231,6 @@ class RouterManager:
             if self.running_batch is not None:
                 if counter_count % 50 == 0:
                     pass
-                self.stats_tool.print_stats()
                 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
@@ -264,7 +263,25 @@ class RouterManager:
                 if pending:
                     n_new += self.graph_eligibility.note_pending(pending)
             if n_new > 0:
-                router_print(f"Eligibility mirror updated: +{n_new} new bucket(s)")
+                # Pull rank-0's totals as the canonical reading. Captures
+                # are lock-step across ranks, so rank-0 mirrors the rest.
+                mem_text = ""
+                try:
+                    stats = self.model_rpcs[0].get_graph_mem_stats()
+                    if stats:
+                        total_bytes = sum(b for b, _ in stats.values())
+                        total_n = sum(n for _, n in stats.values())
+                        per_kind = " | ".join(
+                            f"{kind}={b / (1024.0 ** 2):.1f}MB×{n}"
+                            for kind, (b, n) in stats.items()
+                        )
+                        mem_text = (
+                            f" | graph mem total {total_bytes / (1024.0 ** 2):.1f}MB "
+                            f"across {total_n} graphs ({per_kind})"
+                        )
+                except Exception as me:
+                    mem_text = f" | graph mem read failed: {me}"
+                router_print(f"Eligibility mirror updated: +{n_new} new bucket(s){mem_text}")
         except Exception as e:
             # Don't break scheduling on a transient RPC hiccup.
             print(f"[Router] pop_pending_captures failed: {e}")
@@ -295,7 +312,7 @@ class RouterManager:
             else:
                 await self.resume_backward()
         elif await self.req_queue.check_will_starve(self.running_batch, self.lora_ranks):
-            router_print(f"Incoming request will starve, prefill new batch after {self.decode_step_count} decoding steps.")
+            #router_print(f"Incoming request will starve, prefill new batch after {self.decode_step_count} decoding steps.")
             # Prefill and merge batch
             self._clear_abort_reqs()
             new_mini_batch = self.req_queue.generate_new_batch(self.running_batch, self.lora_ranks, self.is_backward_running())
@@ -378,6 +395,13 @@ class RouterManager:
         has_ft_stamp = bool(finetuning_tokens_list) and sum(finetuning_tokens_list) > 0
         will_graph_stamp = self.graph_eligibility.will_prefill_use_graph(
             has_ft_stamp, len(inference_tokens_list), sum(inference_tokens_list))
+        # Capture regime: bucket isn't yet in the mirror but the runner
+        # will capture it on first hit. Used only to compute a comparable
+        # `predicted_duration` for the tracker — `was_graph` stamping
+        # stays False (eager) by design so the fitter treats this as a
+        # one-shot outlier rather than a graph sample.
+        will_capture_stamp = (not will_graph_stamp) and self.graph_eligibility.will_prefill_capture_on_hit(
+            has_ft_stamp, len(inference_tokens_list), sum(inference_tokens_list))
         prefill_start_time = time.time()
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id, self.prefill_interrupt_event) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -402,7 +426,9 @@ class RouterManager:
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=duration,
                 predicted_duration=self.prefill_estimator.predict_inference(
-                    inference_tokens_list, will_use_graph=will_graph_stamp),
+                    inference_tokens_list,
+                    will_use_graph=will_graph_stamp,
+                    will_capture=will_capture_stamp),
                 was_graph=will_graph_stamp)
             batch.record_time_to_first_token(prefill_end_time)
             if earliest_arrival_time is not None:
@@ -450,6 +476,8 @@ class RouterManager:
         B_dec_stamp = len(inference_tokens_list)
         ml_dec_stamp = max(inference_tokens_list) if inference_tokens_list else 0
         will_graph_dec_stamp = self.graph_eligibility.will_decode_use_graph(B_dec_stamp, ml_dec_stamp)
+        will_capture_dec_stamp = (not will_graph_dec_stamp) and self.graph_eligibility.will_decode_capture_on_hit(
+            B_dec_stamp, ml_dec_stamp)
         start_time = time.time()
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id, self.decode_step_count) for tp_rank in range(self.world_size)]
         try:
@@ -482,7 +510,9 @@ class RouterManager:
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=duration,
                 predicted_duration=self.decode_estimator.predict(
-                    K_dec_log, B_dec_stamp, will_use_graph=will_graph_dec_stamp),
+                    K_dec_log, B_dec_stamp,
+                    will_use_graph=will_graph_dec_stamp,
+                    will_capture=will_capture_dec_stamp),
                 was_graph=will_graph_dec_stamp,
         )
         batch.record_token_time(decode_end_time)

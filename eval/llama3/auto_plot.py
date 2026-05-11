@@ -13,35 +13,43 @@ Subplots (left → right):
   4. TTFT SLO satisfaction rate over time — rolling-window % of requests
      whose TTFT met the SLO threshold, with a 95% reference line.
 
-Defaults assume the alpaca + all-optimizations-on configuration:
-  --co --decode_graph --prefill_graph --bwd_graph --packed_kv --alpaca
+Defaults assume the all-graphs-on co-serving configuration:
+  --co --decode_graph --prefill_graph --bwd_graph
 
-which produces output suffix `_decode_prefill_bwd_kv_alpaca`. Override
-via `--suffix` if you ran a different combination.
+which produces output suffix `_decode_prefill_bwd`. Override via `--suffix`
+if you ran a different combination. (Alpaca + packed_kv are bundled into
+the default serving_config_finetuning.yaml, so they no longer get their
+own suffix tags.)
 
-The TTFT SLO threshold (subplot 4) is read from the YAML config file that
-matches the suffix (alpaca → serving_config_finetuning_alpaca.yaml,
-otherwise → serving_config_finetuning.yaml). Override with `--slo`.
+The TTFT SLO threshold (subplot 4) is read from
+serving_config_finetuning.yaml. Override with `--slo`.
 
 Inputs (under eval/llama3/output/, suffix scheme from auto_benchmark.py):
   timeline_results<base>_<mode>.csv       per-request results
   bwd_log<base>_<mode>.csv                finetune backward log
-  timeline_<mode>.csv                     input timeline (eval/llama3/)
+  timeline_<mode>.csv                     input timeline (under
+                                          eval/llama3/timelines/<gpu>/)
 
 Run upstream first, e.g.:
-  python auto_benchmark.py --co --all_graph --packed_kv --alpaca --loose
-  python auto_benchmark.py --co --all_graph --packed_kv --alpaca --tight
-  python auto_benchmark.py --co --all_graph --packed_kv --alpaca --nutanix
+  python auto_benchmark.py --co --graphs --loose
+  python auto_benchmark.py --co --graphs --tight
+  python auto_benchmark.py --co --graphs --nutanix
 
 Then:
   python auto_plot.py
 """
 import argparse
 import os
+import subprocess
 import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+# The plot helper modules now live under scripts/ — extend sys.path so
+# the original sibling-style imports keep working.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "scripts"))
 
 from bwd_graph_plot import (
     ensure_exists,
@@ -51,21 +59,37 @@ from bwd_graph_plot import (
 from compare_graphs_plot import load_timeline, plot_request_timeline
 
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(_HERE, "output")
 PLOTS_DIR = os.path.join(_HERE, "plots")
 CONFIG_DIR = os.path.join(_HERE, "config")
 DEFAULT_SLO_FALLBACK = 0.35
 
 
+def _detect_gpu_subdir() -> str:
+    """Return the timelines/ subdirectory name matching the local GPU.
+    Greps `nvidia-smi`; falls back to '5090' on failure."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0,
+        )
+        name = (out.strip().splitlines() or [""])[0].upper()
+        if "A100" in name:
+            return "A100"
+        if "5090" in name:
+            return "5090"
+    except Exception:
+        pass
+    return "5090"
+
+
+_DEFAULT_GPU_SUBDIR = _detect_gpu_subdir()
+TIMELINES_DIR = os.path.join(_HERE, "timelines", _DEFAULT_GPU_SUBDIR)
+
+
 def _config_yaml_for_suffix(suffix: str) -> str:
-    """Pick the server YAML whose tags match the run suffix. Used to read
-    the TTFT SLO so the satisfaction-rate subplot's reference matches the
-    actual SLO the server enforced."""
-    if "_alpaca" in suffix:
-        return os.path.join(CONFIG_DIR, "serving_config_finetuning_alpaca.yaml")
-    if "_kv" in suffix:
-        return os.path.join(CONFIG_DIR, "serving_config_finetuning_packed.yaml")
+    """Return the server YAML for the SLO lookup. Only one finetuning
+    YAML exists now (alpaca + packed_kv defaults are bundled in)."""
     return os.path.join(CONFIG_DIR, "serving_config_finetuning.yaml")
 
 
@@ -322,17 +346,19 @@ def main():
     )
     ap.add_argument(
         "--suffix",
-        default="_decode_prefill_bwd_kv_alpaca",
+        default="_decode_prefill_bwd",
         help="Base configuration suffix from auto_benchmark, WITHOUT the "
-             "trailing _<mode> tag. Default '_decode_prefill_bwd_kv_alpaca' "
-             "matches '--co --all_graph --packed_kv --alpaca'.",
+             "trailing _<mode> tag. Default '_decode_prefill_bwd' matches "
+             "'--co --graphs'.",
     )
     ap.add_argument("--output-dir", default=OUTPUT_DIR,
                     help="Where auto_benchmark writes its CSVs.")
     ap.add_argument("--plots-dir", default=PLOTS_DIR,
                     help="Where to write the PNGs.")
-    ap.add_argument("--timeline-csv-dir", default=_HERE,
-                    help="Directory containing timeline_<mode>.csv inputs.")
+    ap.add_argument("--timeline-csv-dir", default=TIMELINES_DIR,
+                    help=f"Directory containing timeline_<mode>.csv inputs. "
+                         f"Default: timelines/<gpu>/ auto-resolved by GPU "
+                         f"(currently '{_DEFAULT_GPU_SUBDIR}').")
     ap.add_argument(
         "--mode",
         choices=ALL_MODES + ("all",),
@@ -344,16 +370,15 @@ def main():
     ap.add_argument(
         "--slo", type=float, default=None,
         help="TTFT SLO threshold (seconds) for the satisfaction-rate subplot. "
-             "Default: read slo.ttft_slo from the YAML matching --suffix "
-             "(alpaca → serving_config_finetuning_alpaca.yaml, otherwise the "
-             "appropriate non-alpaca finetuning YAML). Falls back to "
+             "Default: read slo.ttft_slo from "
+             "serving_config_finetuning.yaml. Falls back to "
              f"{DEFAULT_SLO_FALLBACK}s if the YAML can't be read.",
     )
     ap.add_argument(
         "--config-yaml",
         default=None,
-        help="Override the YAML the SLO is read from. Default: auto-pick by "
-             "suffix tags (see --slo for the resolution rule).",
+        help="Override the YAML the SLO is read from. Default: "
+             "serving_config_finetuning.yaml.",
     )
     ap.add_argument(
         "--window", type=float, default=5.0,

@@ -170,8 +170,9 @@ class Mixed_ReqQueue:
             K_dec = current_batch.get_inference_token_num()
             ml_dec = self._decode_max_len(current_batch)
             dec_will_graph = self._will_decode_use_graph(B_dec, ml_dec)
+            dec_will_capture = (not dec_will_graph) and self._will_decode_capture(B_dec, ml_dec)
             predicted_next_decode_time = self.decode_estimator.predict(
-                K_dec, B_dec, will_use_graph=dec_will_graph)
+                K_dec, B_dec, will_use_graph=dec_will_graph, will_capture=dec_will_capture)
             predicted_next_checking_time = time.time() + predicted_next_decode_time
             pending_inf_token_list = []
             for req in self.waiting_req_list:
@@ -179,30 +180,41 @@ class Mixed_ReqQueue:
             # Prefill regime check: hypothetical inf-only batch of waiting reqs.
             pre_will_graph = self._will_prefill_use_graph(
                 False, len(pending_inf_token_list), sum(pending_inf_token_list))
+            pre_will_capture = (not pre_will_graph) and self._will_prefill_capture(
+                False, len(pending_inf_token_list), sum(pending_inf_token_list))
             predicted_next_prefill_time = self.prefill_estimator.predict_inference(
-                pending_inf_token_list, will_use_graph=pre_will_graph)
+                pending_inf_token_list, will_use_graph=pre_will_graph, will_capture=pre_will_capture)
             time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
             return time_left < 0
         return False
 
     
-    def print_batch_layout(self, infer_tokens, ft_tokens, new_batch, will_use_graph: bool):
+    def print_batch_layout(self, infer_tokens, ft_tokens, new_batch,
+                           will_use_graph: bool, will_capture: bool = False):
         infer_tokens_count = sum(infer_tokens)
         ft_tokens_count = sum(ft_tokens)
         unused = self.batch_max_tokens - (infer_tokens_count + ft_tokens_count)
         # Co-serve batches always go through the eager prefill path (the
         # runtime gates the prefill graph off when has_ft). Inf-only
-        # batches use the regime captured by `will_use_graph`, which the
-        # caller computed once in `generate_new_batch`.
+        # batches use the regime captured by `will_use_graph` /
+        # `will_capture`, which the caller computed once in
+        # `generate_new_batch`.
+        regime_tag = ""
         if ft_tokens_count > 0:
             predicted_duration = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens)
         else:
             predicted_duration = self.prefill_estimator.predict_inference(
-                infer_tokens, will_use_graph=will_use_graph)
+                infer_tokens, will_use_graph=will_use_graph, will_capture=will_capture)
+            if will_capture:
+                regime_tag = " (capture)"
+            elif will_use_graph:
+                regime_tag = " (graph)"
+            else:
+                regime_tag = " (eager)"
         earliest_arrival_time = new_batch.get_earliest_arrival_time()
         text = "\033[34m[Forward Batch Constructor]: "
         text += f"[{infer_tokens_count} Infer | {ft_tokens_count} FT | {unused} unused] "
-        text += f"\tT(Predicted Prefill) = {predicted_duration:.3f}s"
+        text += f"\tT(Predicted Prefill){regime_tag} = {predicted_duration:.3f}s"
         if earliest_arrival_time is not None:
             predicted_longest_ttft = time.time() + predicted_duration - earliest_arrival_time
             text += f" | T(Predicted Worst TTFT) = {predicted_longest_ttft:.3f}s"
@@ -243,6 +255,20 @@ class Mixed_ReqQueue:
         if self.graph_eligibility is None:
             return False
         return self.graph_eligibility.will_decode_use_graph(batch_size, max_len)
+
+    def _will_prefill_capture(self, has_ft: bool, batch_size: int, total_tokens: int) -> bool:
+        """True iff the next prefill at this shape will trigger a
+        first-touch CUDA-graph capture (warmup + record + replay)."""
+        if self.graph_eligibility is None:
+            return False
+        return self.graph_eligibility.will_prefill_capture_on_hit(has_ft, batch_size, total_tokens)
+
+    def _will_decode_capture(self, batch_size: int, max_len: int) -> bool:
+        """True iff the next decode step at this shape will trigger a
+        first-touch CUDA-graph capture."""
+        if self.graph_eligibility is None:
+            return False
+        return self.graph_eligibility.will_decode_capture_on_hit(batch_size, max_len)
 
     @staticmethod
     def _decode_max_len(batch: "Batch") -> int:
@@ -330,8 +356,12 @@ class Mixed_ReqQueue:
                     ml_next = max(self._decode_max_len(current_batch),
                                   max(infer_tokens) if infer_tokens else 0)
                     dec_will_graph_next = self._will_decode_use_graph(B_next, ml_next)
+                    dec_will_capture_next = (not dec_will_graph_next) and self._will_decode_capture(
+                        B_next, ml_next)
                     predicted_next_decode_time = self.decode_estimator.predict(
-                        K_next, B_next, will_use_graph=dec_will_graph_next)
+                        K_next, B_next,
+                        will_use_graph=dec_will_graph_next,
+                        will_capture=dec_will_capture_next)
                     next_token_time = predicted_next_prefill_time + predicted_next_decode_time
                     if next_token_time > self.max_tbt_slo:
                         #print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
@@ -358,7 +388,12 @@ class Mixed_ReqQueue:
                 False if has_ft_now
                 else self._will_prefill_use_graph(False, len(infer_tokens), sum(infer_tokens))
             )
-            self.print_batch_layout(infer_tokens, ft_tokens, new_batch, will_graph_now)
+            will_capture_now = (
+                False if (has_ft_now or will_graph_now)
+                else self._will_prefill_capture(False, len(infer_tokens), sum(infer_tokens))
+            )
+            self.print_batch_layout(infer_tokens, ft_tokens, new_batch,
+                                    will_graph_now, will_capture_now)
             #self.last_batch_time = time.time()
             #print(f"\033[32m[Batch Generation Time]: {time.time() - start:.4f} seconds\033[0m")
             return new_batch

@@ -26,6 +26,7 @@ class Stats:
         return
 
     def print_stats(self):
+        return
         if not self.log_stats:
             return
 

@@ -36,6 +36,9 @@ lora:
 scheduler:
   name: dserve
   enable_abort: false
+  # Where the BatchExecutionTracker dumps per-batch scheduling decisions
+  # at finetuning exit. Path is relative to CWD; set to null to disable.
+  batch_prediction_stats_path: output/scheduler/batch_prediction_stats.csv
 
 memory:
   enable_unified_mem_manager: true

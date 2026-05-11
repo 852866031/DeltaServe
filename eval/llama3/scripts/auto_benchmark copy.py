@@ -24,19 +24,18 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
-from tqdm import tqdm
 
 from pathlib import Path
-SCRIPT_DIR = Path(__file__).resolve().parent
+# This is the relocated copy of auto_benchmark.py (now under llama3/scripts/).
+# The runtime expects all data/output paths to live at the llama3/ level,
+# which is the parent of this file. Treat SCRIPT_DIR as that parent so the
+# existing path expressions keep working post-move.
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _detect_gpu_subdir() -> str:
     """Return the timelines/ subdirectory name matching the local GPU.
-
-    Greps `nvidia-smi -L` for the GPU model. Falls back to '5090' if
-    detection fails — that's the workstation default; override via
-    --timeline-gpu when running on a different machine.
-    """
+    Greps `nvidia-smi`; falls back to '5090' on failure."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -52,25 +51,7 @@ def _detect_gpu_subdir() -> str:
     return "5090"
 
 
-# Resolved once at import; can be overridden by the --timeline-gpu CLI flag.
 _DEFAULT_GPU_SUBDIR = _detect_gpu_subdir()
-TIMELINES_DIR = SCRIPT_DIR / "timelines" / _DEFAULT_GPU_SUBDIR
-
-
-# Module-level reference to the active progress bar so the log pump can
-# route output through tqdm.write() and keep the bar anchored at the
-# bottom of the terminal while the timeline runs.
-_active_pbar: Optional["tqdm"] = None
-
-
-def _emit_line(line: str) -> None:
-    """Write a complete log line. Goes through tqdm.write when the
-    timeline progress bar is active so the bar stays at the bottom."""
-    if _active_pbar is not None:
-        tqdm.write(line, file=sys.stdout)
-    else:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
 
 
 # ----------------------------
@@ -352,9 +333,6 @@ async def run_timeline_requests(
     results: List[Tuple[int, float, float, str, Optional[float], Optional[float], Optional[float]]] = []
 
     base_ts = min(r.timestamp_s for r in timeline_rows) if normalize_start else 0.0
-    # Total schedule duration is the last row's relative timestamp — the
-    # progress bar tracks wall-clock progress against this.
-    total_duration = max(r.timestamp_s for r in timeline_rows) - base_ts
 
     async with aiohttp.ClientSession(
         headers={"User-Agent": "TimelineClient"},
@@ -363,41 +341,7 @@ async def run_timeline_requests(
     ) as session:
         t0 = time.monotonic()
         print(f"[orchestrator] Timeline start (normalize={normalize_start}, base_ts={base_ts:.6f})", flush=True)
-        print(f"[orchestrator] Scheduling {len(timeline_rows)} requests "
-              f"(total schedule duration: {total_duration:.2f}s)", flush=True)
-
-        global _active_pbar
-        pbar = tqdm(
-            total=max(total_duration, 1e-3),
-            desc="Timeline",
-            unit="s",
-            bar_format="{desc}: {percentage:5.1f}%|{bar}| {n:6.1f}/{total:.1f}s "
-                       "[{elapsed}<{remaining}]",
-            leave=True,
-            position=0,
-            dynamic_ncols=True,
-            file=sys.stdout,
-            mininterval=0.1,
-        )
-        _active_pbar = pbar
-
-        async def _progress_updater() -> None:
-            last = 0.0
-            while not stop_event.is_set():
-                elapsed = min(time.monotonic() - t0, total_duration)
-                delta = elapsed - last
-                if delta > 0:
-                    pbar.update(delta)
-                    last = elapsed
-                if elapsed >= total_duration:
-                    return
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=0.5)
-                    return
-                except asyncio.TimeoutError:
-                    continue
-
-        progress_task = asyncio.create_task(_progress_updater())
+        print(f"[orchestrator] Scheduling {len(timeline_rows)} requests", flush=True)
 
         async def _run_one(row: TimelineRow) -> None:
             target_rel = row.timestamp_s - base_ts
@@ -430,21 +374,7 @@ async def run_timeline_requests(
             results.append((idx, t_rel_out, latency, status, ttft, avg_tbt, worst_tbt))
 
         tasks = [asyncio.create_task(_run_one(row)) for row in timeline_rows]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            progress_task.cancel()
-            try:
-                await progress_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            # Snap bar to 100% on clean completion so the final render
-            # reflects the full schedule.
-            if not stop_event.is_set() and pbar.n < pbar.total:
-                pbar.update(pbar.total - pbar.n)
-            pbar.refresh()
-            pbar.close()
-            _active_pbar = None
+        await asyncio.gather(*tasks)
 
     # Sort by idx for stable CSV order like the sample
     results.sort(key=lambda x: x[0])
@@ -515,9 +445,29 @@ async def main() -> None:
                     help="Subsample the timeline: send only every N-th request "
                          "(those whose 0-indexed row_id is divisible by N). "
                          "Default 1 (send all).")
+    # packed_kv allocator. Default-on because GQA-packed paging is the
+    # production allocator; pass --no_packed_kv to fall back to the
+    # legacy "unified" path (e.g. for comparison runs).
+    kv_group = ap.add_mutually_exclusive_group()
+    kv_group.add_argument(
+        "--packed_kv", dest="packed_kv", action="store_true", default=True,
+        help="Use the packed_kv allocator (sets memory.allocator=packed_kv "
+             "via launch_llama3.py). Tags output filenames with '_kv'. "
+             "DEFAULT: on.")
+    kv_group.add_argument(
+        "--no_packed_kv", dest="packed_kv", action="store_false",
+        help="Disable the packed_kv allocator (falls back to 'unified'). "
+             "Output filenames omit the '_kv' tag — the form expected by "
+             "compare_kv_plot.py for the baseline side of the comparison.")
     ap.add_argument("--track_occupancy", action="store_true", default=False,
                     help="Enable allocator page-occupancy sampling. Writes "
                          "output/occupancy<suffix>.csv (one row per second).")
+    ap.add_argument("--alpaca", action="store_true", default=False,
+                    help="Use the Alpaca-1000 finetuning config "
+                         "(serving_config_finetuning_alpaca.yaml). Passes "
+                         "--alpaca to the launcher and tags output filenames "
+                         "with '_alpaca'. The alpaca yaml uses packed_kv, so "
+                         "--no_packed_kv is rejected when --alpaca is set.")
     # ft_log_path and out_csv default to base names; final paths are composed
     # below under OUTPUT_DIR with a suffix encoding which graphs are enabled.
     ap.add_argument("--ft_log_path", type=str, default="bwd_log.csv")
@@ -533,6 +483,12 @@ async def main() -> None:
     shape_flags = sum(1 for f in (args.tight, args.loose, args.nutanix) if f)
     if shape_flags > 1:
         ap.error("--tight, --loose, and --nutanix are mutually exclusive")
+    if args.alpaca and not args.packed_kv:
+        ap.error("--alpaca implies the packed_kv allocator (the alpaca yaml "
+                 "uses it); drop --no_packed_kv.")
+    if args.alpaca and not args.co:
+        ap.error("--alpaca requires --co (the alpaca yaml is a finetuning "
+                 "config; without --co the no-finetune yaml is used instead).")
     if args.fold < 1:
         ap.error("--fold must be a positive integer")
     if args.graphs:
@@ -580,7 +536,16 @@ async def main() -> None:
         tags.append("prefill")
     if args.bwd_graph:
         tags.append("bwd")
-    # Schedule-shape tag.
+    # Workload-shape tag goes BEFORE the allocator tag so the unified-vs-
+    # packed_kv comparison plots (which look up `<suffix>` and `<suffix>_kv`)
+    # find both files for the same workload shape.
+    if args.packed_kv:
+        tags.append("kv")
+    # Dataset tag sits after the allocator tag and before the schedule-shape
+    # tag so emotion vs. alpaca comparisons under the same allocator share
+    # a stable prefix.
+    if args.alpaca:
+        tags.append("alpaca")
     if args.tight:
         tags.append("tight")
     elif args.loose:
@@ -621,6 +586,10 @@ async def main() -> None:
         cmd.append("--enable-prefill-cuda-graph")
     if args.bwd_graph:
         cmd.append("--enable-bwd-cuda-graph")
+    if args.packed_kv:
+        cmd.append("--packed-kv")
+    if args.alpaca:
+        cmd.append("--alpaca")
     if occupancy_log is not None:
         cmd.append("--occupancy_log")
         cmd.append(occupancy_log)
@@ -675,27 +644,22 @@ async def main() -> None:
                 raw = await loop.run_in_executor(None, read_chunk)
                 if not raw:
                     if buf:
-                        _emit_line(("\r" if redrawing else "") + "[server] " + "".join(buf))
+                        sys.stdout.write(("\r" if redrawing else "") + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
                     break
                 chunk = raw.decode("utf-8", errors="replace")
                 for ch in chunk:
                     if ch == "\n":
                         prefix = "\r" if redrawing else ""
-                        _emit_line(prefix + "[server] " + "".join(buf))
+                        sys.stdout.write(prefix + "[server] " + "".join(buf) + "\n")
+                        sys.stdout.flush()
                         buf.clear()
                         redrawing = False
                     elif ch == "\r":
-                        # In-place redraw (e.g. server-side tqdm bar). When
-                        # our timeline progress bar is active, fold these
-                        # into normal lines so they don't fight the bottom
-                        # bar; otherwise keep the redraw behavior.
-                        if _active_pbar is not None:
-                            _emit_line("[server] " + "".join(buf))
-                        else:
-                            sys.stdout.write("\r[server] " + "".join(buf))
-                            sys.stdout.flush()
+                        sys.stdout.write("\r[server] " + "".join(buf))
+                        sys.stdout.flush()
                         buf.clear()
-                        redrawing = _active_pbar is None
+                        redrawing = True
                     else:
                         buf.append(ch)
 

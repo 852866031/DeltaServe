@@ -280,16 +280,31 @@ class FinetuningManager:
 
         bar_width = 50
         ratio = self.finetuning_tokens_processed / max(self.total_tokens_in_memory, 1)
-        filled_len = int(bar_width * ratio)
-        empty_len = bar_width - filled_len
-        grey = "*"
-        white = " "
-        bar = grey * filled_len + white * empty_len
-        print(f"Epoch: {self.current_epoch+1}/{self.total_epochs} [{bar}] {ratio:.1%} ", end="", flush=True)
+        is_complete = self.finetuning_tokens_processed >= self.total_tokens_in_memory
+        # Print the bar only when we cross a 20% milestone (0/20/40/60/80%)
+        # or hit 100% — avoids flooding the log with one bar per backward
+        # batch. `_bar_last_milestone` defaults to -1 so the first call of
+        # each epoch always emits a baseline.
+        milestone = 5 if is_complete else int(ratio * 5)
+        last_milestone = getattr(self, "_bar_last_milestone", -1)
+        should_print_bar = milestone > last_milestone
 
-        if self.finetuning_tokens_processed >= self.total_tokens_in_memory:
+        if should_print_bar:
+            filled_len = int(bar_width * ratio)
+            empty_len = bar_width - filled_len
+            grey = "*"
+            white = " "
+            bar = grey * filled_len + white * empty_len
+            print(f"Epoch: {self.current_epoch+1}/{self.total_epochs} [{bar}] {ratio:.1%} ",
+                  end="", flush=True)
+            self._bar_last_milestone = milestone
+
+        if is_complete:
             self.epoch_avg_loss_list.append(np.mean(self.loss_list))
-            print(f" Average Loss: {self.epoch_avg_loss_list[-1]:.6f}")
+            # If we just emitted the bar above, append on the same line;
+            # otherwise start a fresh line so the loss isn't orphaned.
+            avg_loss_msg = f"Average Loss: {self.epoch_avg_loss_list[-1]:.6f}"
+            print(f" {avg_loss_msg}" if should_print_bar else avg_loss_msg)
             self.loss_list = []
             self.advance_epoch()
             if self.current_epoch >= self.total_epochs:
@@ -299,7 +314,10 @@ class FinetuningManager:
                 print("=== End of Loss List ===", flush=True)
             else:
                 self.finetuning_tokens_processed = 0
-        else:
+                # Reset for the next epoch so 0%/20%/... fire again.
+                self._bar_last_milestone = -1
+        elif should_print_bar:
+            # Terminate the in-progress bar line with a newline.
             print()
 
     def finetuning_is_finished(self):

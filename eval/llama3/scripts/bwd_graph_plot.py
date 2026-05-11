@@ -24,8 +24,9 @@ import pandas as pd
 
 # ---------------- Paths ----------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(_HERE, "output")
-PLOTS_DIR = os.path.join(_HERE, "plots")
+# Script lives under llama3/scripts/; output/ and plots/ are one level up.
+OUTPUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "output"))
+PLOTS_DIR = os.path.abspath(os.path.join(_HERE, "..", "plots"))
 
 RESULTS_BASELINE = os.path.join(OUTPUT_DIR, "timeline_results.csv")
 RESULTS_BWD_GRAPH = os.path.join(OUTPUT_DIR, "timeline_results_bwd.csv")

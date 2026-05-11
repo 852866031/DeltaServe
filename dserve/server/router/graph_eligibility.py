@@ -95,6 +95,31 @@ class GraphEligibility:
         )
         return key in self._prefill_buckets
 
+    def will_prefill_capture_on_hit(
+        self, has_ft: bool, batch_size: int, total_tokens: int
+    ) -> bool:
+        """True iff a prefill batch with this shape would trigger a
+        first-touch CUDA-graph *capture* at runtime (the slow path that
+        runs warmup forward + capture forward + replay).
+
+        A bucket is captureable iff (a) prefill graph capture is enabled,
+        (b) the batch is inference-only — co-serve is hard-gated to
+        eager, (c) the batch fits within the runner's bs bucketing
+        scheme. If those hold and the bucket is *not* currently in the
+        captured set, the next hit will trigger capture.
+        """
+        if has_ft:
+            return False
+        if not self.prefill_enabled:
+            return False
+        if batch_size > CudaGraphRunner.PREFILL_BS_BUCKETS[-1]:
+            return False
+        key = (
+            CudaGraphRunner.get_prefill_bs_bucket(batch_size),
+            CudaGraphRunner.get_prefill_token_bucket(total_tokens),
+        )
+        return key not in self._prefill_buckets
+
     def will_decode_use_graph(self, batch_size: int, max_len_in_batch: int) -> bool:
         """True iff a decode step with this shape would replay a captured graph.
         Decode key uses exact batch_size (not bucketed) — mirrors the runner."""
@@ -102,6 +127,16 @@ class GraphEligibility:
             return False
         key = (batch_size, CudaGraphRunner.get_max_len_bucket(max_len_in_batch))
         return key in self._decode_buckets
+
+    def will_decode_capture_on_hit(self, batch_size: int, max_len_in_batch: int) -> bool:
+        """True iff a decode step with this shape would trigger a
+        first-touch capture. Decode has no batch-size cap (the runner
+        keys on exact bs), so any uncaptured bucket is captureable when
+        decode graphs are enabled."""
+        if not self.decode_enabled:
+            return False
+        key = (batch_size, CudaGraphRunner.get_max_len_bucket(max_len_in_batch))
+        return key not in self._decode_buckets
 
     # ─── Introspection (logging / debug) ───────────────────────────────
     def num_decode_buckets(self) -> int:

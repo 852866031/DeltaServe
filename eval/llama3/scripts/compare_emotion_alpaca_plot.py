@@ -43,8 +43,34 @@ from compare_graphs_plot import load_timeline, plot_request_timeline
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(_HERE, "output")
-PLOTS_DIR = os.path.join(_HERE, "plots")
+
+
+def _detect_gpu_subdir() -> str:
+    """Return the timelines/ subdirectory name matching the local GPU.
+    Greps `nvidia-smi`; falls back to '5090' on failure."""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0,
+        )
+        name = (out.strip().splitlines() or [""])[0].upper()
+        if "A100" in name:
+            return "A100"
+        if "5090" in name:
+            return "5090"
+    except Exception:
+        pass
+    return "5090"
+
+
+_DEFAULT_GPU_SUBDIR = _detect_gpu_subdir()
+# Script lives under llama3/scripts/; output/, plots/, and timelines/<gpu>/
+# are one level up from _HERE.
+OUTPUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "output"))
+PLOTS_DIR = os.path.abspath(os.path.join(_HERE, "..", "plots"))
+TIMELINES_DIR = os.path.abspath(os.path.join(
+    _HERE, "..", "timelines", _DEFAULT_GPU_SUBDIR))
 
 EMOTION_LABEL = "emotion"
 ALPACA_LABEL = "alpaca"
@@ -123,7 +149,7 @@ def main() -> None:
     args = ap.parse_args()
 
     for shape in args.shapes:
-        timeline_csv = _timeline_for_shape(_HERE, shape)
+        timeline_csv = _timeline_for_shape(TIMELINES_DIR, shape)
         out_path = os.path.join(
             args.plots_dir, f"compare_emotion_alpaca_{shape}.png"
         )

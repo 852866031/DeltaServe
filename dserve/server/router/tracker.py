@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import math
-import math
+import os
 from typing import Iterable, List, Optional, Sequence, Tuple
 import time
 import numpy as np
@@ -111,8 +111,27 @@ class BatchExecutionTracker():
     
     def write_batch_prediction_stats_to_csv(
         self,
-        csv_path: str = "batch_prediction_stats.csv",
+        csv_path: Optional[str] = None,
     ):
+        # Resolve path: explicit arg wins; else read scheduler.batch_prediction_stats_path
+        # from the active config (default: output/scheduler/batch_prediction_stats.csv).
+        # `None` from the YAML disables the dump entirely.
+        if csv_path is None:
+            try:
+                from dserve.common.configs.config import get_active_config
+                csv_path = get_active_config().scheduler.batch_prediction_stats_path
+            except Exception:
+                csv_path = "output/scheduler/batch_prediction_stats.csv"
+        if csv_path is None:
+            print("[BatchExecutionTracker] scheduler.batch_prediction_stats_path "
+                  "is null — skipping prediction-stats CSV dump.")
+            return
+        # Anchor relative paths to the working directory's project root so
+        # absolute and relative configurations both land somewhere sensible.
+        csv_path = str(csv_path)
+        parent_dir = os.path.dirname(csv_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
         rows = []
         for i in range(self.size()):
             pred = self.predicted_duration_list[i]
@@ -324,25 +343,63 @@ class PrefillExecutionEstimator:
         # Fallback: whatever's available.
         return self._eager_params if self._eager_params.alpha is not None else self._graph_params
 
-    def predict_inference(self, token_list: List[int], will_use_graph: bool = False) -> float:
+    def _eval_params(self, p: PrefillParams, S: float, Tin: float) -> Optional[float]:
+        """Evaluate the linear model with the given params; returns None
+        when the regime hasn't been fitted yet."""
+        if any(v is None for v in (p.alpha, p.beta, p.c)):
+            return None
+        return float(p.alpha * S + p.beta * Tin + p.c)
+
+    def predict_inference(
+        self,
+        token_list: List[int],
+        will_use_graph: bool = False,
+        will_capture: bool = False,
+    ) -> float:
         """Predict prefill time for an inference-only batch.
 
-        `will_use_graph`: caller's eligibility result. When False, uses
-        eager-regime params (which always exist if any data has been
-        seen). When True, uses graph-regime params if fitted, else
-        falls back to eager.
-        """
-        p = self._select_params(will_use_graph)
-        if any(v is None for v in (p.alpha, p.beta, p.c)):
-            print("Model not fitted yet")
-            return 0.5
+        Three regimes:
+          * `will_capture=True` → first-touch CUDA-graph capture path.
+            Cost is structural: 2 eager forwards (side-stream warmup +
+            in-capture forward) + 1 graph replay
+            (`cuda_graph_runner.prefill_capture()` lines 459-471). Both
+            regimes are evaluated and combined analytically — no
+            third-regime fit is required.
+          * `will_use_graph=True` (and not capturing) → graph regime.
+          * else → pure eager regime.
 
+        `will_capture` takes precedence over `will_use_graph` since the
+        capture path runs the eager pieces anyway.
+        """
         n = np.asarray(token_list, dtype=float)
         if n.size == 0:
             return 0.0
 
-        S = np.sum(n ** 2)
-        Tin = np.sum(n)
+        S = float(np.sum(n ** 2))
+        Tin = float(np.sum(n))
+
+        if will_capture:
+            eager_pred = self._eval_params(self._eager_params, S, Tin)
+            graph_pred = self._eval_params(self._graph_params, S, Tin)
+            if eager_pred is None and graph_pred is None:
+                print("Model not fitted yet")
+                return 0.5
+            # Cold-start safety: if a regime is unfitted, substitute the
+            # other so the structural sum is still meaningful.
+            if eager_pred is None:
+                eager_pred = graph_pred
+            if graph_pred is None:
+                graph_pred = eager_pred
+            pred = 2.0 * eager_pred + graph_pred
+            # Eager components dominate; bump by eager rmse.
+            if self.eager_fit_rmse:
+                pred *= 1 + 1.5 * self.eager_fit_rmse
+            return float(pred)
+
+        p = self._select_params(will_use_graph)
+        if any(v is None for v in (p.alpha, p.beta, p.c)):
+            print("Model not fitted yet")
+            return 0.5
 
         pred = p.alpha * S + p.beta * Tin + p.c
 
@@ -698,7 +755,43 @@ class DecodeExecutionEstimator:
         # Cold-start fallback: pick whichever is fitted.
         return self._graph_params if self._graph_params.delta != 0.0 else self._eager_params
 
-    def predict(self, total_tokens: float, batch_size: float, will_use_graph: bool = False) -> float:
+    @staticmethod
+    def _params_fitted(p: "DecodeParams") -> bool:
+        # `delta != 0.0` is the existing fitted-sentinel used by
+        # `_select_params`; preserve that convention.
+        return p.delta != 0.0 or p.epsilon != 0.0 or p.d != 0.0
+
+    def predict(
+        self,
+        total_tokens: float,
+        batch_size: float,
+        will_use_graph: bool = False,
+        will_capture: bool = False,
+    ) -> float:
+        """Three regimes, mirroring `PrefillExecutionEstimator`.
+
+        Decode `capture()` does 3 warmup forwards + 1 forward inside the
+        graph context, with no post-capture replay
+        (`cuda_graph_runner.py:249-260`). So capture cost ≈ 4 × eager;
+        the graph replay term doesn't appear here.
+        """
+        if will_capture:
+            ep = self._eager_params
+            gp = self._graph_params
+            eager_pred = (
+                ep.delta * batch_size + ep.epsilon * total_tokens + ep.d
+                if self._params_fitted(ep) else None
+            )
+            graph_pred = (
+                gp.delta * batch_size + gp.epsilon * total_tokens + gp.d
+                if self._params_fitted(gp) else None
+            )
+            if eager_pred is None and graph_pred is None:
+                return 0.0
+            if eager_pred is None:
+                eager_pred = graph_pred
+            return float(4.0 * eager_pred)
+
         p = self._select_params(will_use_graph)
         pred = p.delta * batch_size + p.epsilon * total_tokens + p.d
         return float(pred)

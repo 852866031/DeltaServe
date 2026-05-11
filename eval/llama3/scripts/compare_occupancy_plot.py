@@ -26,8 +26,9 @@ import pandas as pd
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(_HERE, "output")
-PLOTS_DIR = os.path.join(_HERE, "plots")
+# Script lives under llama3/scripts/; output/ and plots/ are one level up.
+OUTPUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "output"))
+PLOTS_DIR = os.path.abspath(os.path.join(_HERE, "..", "plots"))
 
 UNIFIED_LABEL = "unified"
 PACKED_LABEL = "packed_kv"

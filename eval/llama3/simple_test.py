@@ -18,10 +18,33 @@ import time
 from typing import Dict, Optional
 
 import aiohttp
+import subprocess
+
+
+def _detect_gpu_subdir() -> str:
+    """Return the timelines/ subdirectory name matching the local GPU.
+    Greps `nvidia-smi`; falls back to '5090' on failure."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0,
+        )
+        name = (out.strip().splitlines() or [""])[0].upper()
+        if "A100" in name:
+            return "A100"
+        if "5090" in name:
+            return "5090"
+    except Exception:
+        pass
+    return "5090"
+
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULTS = {
     "server": "http://localhost:9000",
-    "timeline_csv": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv",
+    "timeline_csv": os.path.join(
+        _SCRIPT_DIR, "timelines", _detect_gpu_subdir(), "timeline_live.csv"),
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,

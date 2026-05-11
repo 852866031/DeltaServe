@@ -61,6 +61,12 @@ class LoRASection:
 class SchedulerSection:
     name: str = "dserve"
     enable_abort: bool = False
+    # Path where the BatchExecutionTracker writes per-batch scheduling
+    # decisions (predicted vs. actual durations, batch composition) at
+    # finetuning exit. Path may be absolute or relative; relative paths
+    # resolve against the active project root (eval/llama3/ in practice).
+    # Parent directories are created on write. Set to null to disable.
+    batch_prediction_stats_path: Optional[str] = "output/scheduler/batch_prediction_stats.csv"
 
 
 @dataclass
@@ -95,6 +101,12 @@ class CudaGraphSection:
     # lazily capture on first hit (one-time latency spike). null = use
     # INF_CAP from the generator (i.e. batch_max_tokens / 2 of max_total).
     prefill_sweep_max_tokens: Optional[int] = None
+    # Cap on total CUDA-graph memory (decode + prefill graphs combined).
+    # When the live capture path would push total bytes over this, the
+    # runner refuses to capture and falls back to eager forward for that
+    # bucket. Once tripped, no further runtime captures happen for the
+    # rest of the run (graph memory only grows). null = no cap.
+    max_graph_memory_gb: Optional[float] = None
 
 
 @dataclass

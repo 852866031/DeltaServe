@@ -204,8 +204,8 @@ class ProfilingBatchGenerator:
         else:
             inf_targets = self._inference_token_targets()
             inf_decomp = self._inference_decomposition_variants()
-            print(f"  inference token sweep: {inf_targets}")
-            print(f"  inference decomposition variants (total, n_reqs): {inf_decomp}")
+            #print(f"  inference token sweep: {inf_targets}")
+            #print(f"  inference decomposition variants (total, n_reqs): {inf_decomp}")
             # Capture-priming pass → warmup (no stats)
             for total in inf_targets:
                 self.warmup_batches.append(self._build_inference_batch_exact(total))

@@ -23,6 +23,19 @@ import math
 from dserve.common.cuda_graph_runner import CudaGraphRunner
 
 
+def _resolve_max_graph_memory_bytes() -> "int | None":
+    """Read `cuda_graph.max_graph_memory_gb` from active cfg and return
+    bytes, or None if unset / non-positive (no cap)."""
+    try:
+        from dserve.common.configs.config import get_active_config
+        cap_gb = get_active_config().cuda_graph.max_graph_memory_gb
+    except Exception:
+        return None
+    if cap_gb is None or cap_gb < 0:
+        return None
+    return int(cap_gb * (1024 ** 3))
+
+
 import torch
 import hashlib
 
@@ -272,6 +285,7 @@ class LoraUnorderedBatchMixed:
                 tp_q_head_num=self.base_model.tp_q_head_num_,
                 tp_k_head_num=self.base_model.tp_k_head_num_,
                 head_dim=self.base_model.head_dim_,
+                max_graph_memory_bytes=_resolve_max_graph_memory_bytes(),
             )
         runner = LoraUnorderedBatchMixed._shared_cuda_graph_runner
 
@@ -294,10 +308,17 @@ class LoraUnorderedBatchMixed:
         if runner.has_prefill_graph(batch_size, total_token_num):
             logits = runner.prefill_replay(
                 self, batch_size, total_token_num, input_ids, infer_state, real_batch_req_bins)
-        else:
+        elif runner.can_capture_more():
             logits = runner.prefill_capture(
                 self, batch_size, total_token_num, self._context_forward,
                 input_ids, infer_state, real_batch_req_bins, forward_kwargs)
+        else:
+            # Memory cap reached — run the padded eager forward instead
+            # of a fresh capture. Same math as the captured path, no graph.
+            runner.note_capture_refused()
+            logits = self._prefill_padded_no_graph(
+                batch_size, total_token_num, input_ids, infer_state,
+                real_batch_req_bins, forward_kwargs)
         # logits is bs_bucket-sized; the caller expects exactly batch_size rows.
         return logits[:batch_size]
 
@@ -682,6 +703,7 @@ class LoraUnorderedBatchMixed:
                 tp_q_head_num=self.base_model.tp_q_head_num_,
                 tp_k_head_num=self.base_model.tp_k_head_num_,
                 head_dim=self.base_model.head_dim_,
+                max_graph_memory_bytes=_resolve_max_graph_memory_bytes(),
             )
 
         forward_kwargs = {
@@ -690,13 +712,22 @@ class LoraUnorderedBatchMixed:
             'print_time_profile': False,
         }
 
-        if LoraUnorderedBatchMixed._shared_cuda_graph_runner.has_graph(batch_size, max_len_in_batch):
-            predict_logics = LoraUnorderedBatchMixed._shared_cuda_graph_runner.replay(
+        runner = LoraUnorderedBatchMixed._shared_cuda_graph_runner
+        if runner.has_graph(batch_size, max_len_in_batch):
+            predict_logics = runner.replay(
                 batch_size, max_len_in_batch, input_ids, infer_state)
-        else:
-            predict_logics = LoraUnorderedBatchMixed._shared_cuda_graph_runner.capture(
+        elif runner.can_capture_more():
+            predict_logics = runner.capture(
                 batch_size, max_len_in_batch, self._token_forward,
                 input_ids, infer_state, forward_kwargs)
+        else:
+            # Memory cap reached — bypass the runner and run eager.
+            runner.note_capture_refused()
+            predict_logics = self._token_forward(
+                input_ids, infer_state,
+                no_lora_compute=no_lora_compute,
+                no_lora_copy=no_lora_copy,
+                print_time_profile=False)
         return predict_logics
     
     @final
