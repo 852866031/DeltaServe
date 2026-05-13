@@ -184,7 +184,7 @@ class Mixed_ReqQueue:
                 False, len(pending_inf_token_list), sum(pending_inf_token_list))
             predicted_next_prefill_time = self.prefill_estimator.predict_inference(
                 pending_inf_token_list, will_use_graph=pre_will_graph, will_capture=pre_will_capture)
-            time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
+            time_left = self.get_earliest_req_time() + 0.9* self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
             return time_left < 0
         return False
 

@@ -59,7 +59,7 @@ cuda_graph:
   # Cap on combined prefill+decode CUDA-graph memory (GB). Once total
   # captured graph memory reaches this, runtime captures are refused
   # and uncaptured buckets fall back to eager. -1 = no cap.
-  max_graph_memory_gb: 3.5
+  max_graph_memory_gb: 6
 
 finetune:
   enabled: true
@@ -80,7 +80,7 @@ finetune:
 # Looser TTFT SLO under finetune load — co-serving is allowed to trade
 # inference latency for backward throughput.
 slo:
-  ttft_slo: 0.45
+  ttft_slo: 0.5
   avg_tbt_slo: 0.15
   max_tbt_slo: 0.35
 

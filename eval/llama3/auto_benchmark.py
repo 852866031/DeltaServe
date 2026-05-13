@@ -525,7 +525,7 @@ async def main() -> None:
 
     # warmup config
     ap.add_argument("--warmup_count", type=int, default=1000)
-    ap.add_argument("--warmup_duration_s", type=float, default=15.0)
+    ap.add_argument("--warmup_duration_s", type=float, default=20.0)
     ap.add_argument("--warmup_rest_s", type=float, default=2.0)
 
     args = ap.parse_args()
