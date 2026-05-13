@@ -42,6 +42,7 @@ import argparse
 import os
 import subprocess
 import sys
+from typing import Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -156,6 +157,29 @@ def _ft_per_bin(rel_t, cum_tok, t_max, bin_s):
     return deltas
 
 
+def _smooth(y: np.ndarray, window_s: float, bin_s: float) -> np.ndarray:
+    """Centered rolling mean over `window_s` seconds. Used to flatten the
+    per-second spikes that come from chunky backward token release so the
+    burst-shape signal stays readable on long workloads."""
+    if y.size == 0 or window_s <= 0 or bin_s <= 0:
+        return y
+    w = max(1, int(round(window_s / bin_s)))
+    if w <= 1 or y.size < w:
+        return y
+    kernel = np.ones(w, dtype=float) / w
+    return np.convolve(y, kernel, mode="same")
+
+
+def _auto_throughput_window_s(t_max: float) -> float:
+    """Pick a smoothing window proportional to workload duration.
+    Targets ~100 effective points across the chart: short runs get a
+    narrow window so brief bursts stay visible, long runs get a wider
+    window so per-second spikes don't dominate. Clamped to [5, 60] s."""
+    if t_max <= 0:
+        return 5.0
+    return float(np.clip(t_max / 100.0, 5.0, 60.0))
+
+
 # ---------------- Single-trace plot helpers ----------------
 def plot_latency_vs_time_single(ax, results_df, label: str, color: str):
     ok = results_df[results_df["ok"]]
@@ -183,6 +207,7 @@ def plot_latency_vs_time_single(ax, results_df, label: str, color: str):
 def plot_throughput_curves(
     ax, results_df, timeline_df, bwd_log,
     color_inf: str, bin_s: float = 1.0,
+    smoothing_window_s: Optional[float] = None,
 ):
     """Two-curve throughput view: inference-only tokens/s and total
     (inference + finetune) tokens/s. The area BETWEEN the curves — which
@@ -191,6 +216,12 @@ def plot_throughput_curves(
     Both series are on the request-timeline time origin; the FT origin is
     the bwd-log's first event, so very early seconds may be slightly
     misaligned by the FT-trigger latency (a few s).
+
+    `smoothing_window_s` controls the rolling-mean window used to flatten
+    per-second spikes (chunky backward token release). None → auto-pick
+    based on workload duration (`_auto_throughput_window_s`). Raw per-bin
+    values are still drawn as a faint background so true outliers stay
+    visible.
     """
     # Join max_new_tokens onto results via row_id (timeline df.index == row_id).
     tl = timeline_df.copy()
@@ -235,24 +266,60 @@ def plot_throughput_curves(
     centers = (np.arange(n) + 0.5) * bin_s
     total = inf_per_s + ft_per_s
 
+    # Averages from the *raw* per-bin signal — that's the right number
+    # for the legend, smoothing must not change reported totals.
     inf_avg, ft_avg, tot_avg = inf_per_s.mean(), ft_per_s.mean(), total.mean()
 
-    # Shade the gap between inference and total — that gap IS the FT contribution.
+    # Smoothing: auto-pick window if not provided. Apply to all three
+    # series the same way so the shaded gap stays consistent.
+    win_s = smoothing_window_s if smoothing_window_s is not None \
+        else _auto_throughput_window_s(t_max)
+    inf_smooth = _smooth(inf_per_s, win_s, bin_s)
+    total_smooth = _smooth(total, win_s, bin_s)
+
+    # Raw per-bin "Total" as a very faint background so true peaks are
+    # still visible if they matter for debugging. Skip when smoothing is
+    # effectively off so we don't double-draw the same line.
+    if win_s > bin_s:
+        ax.plot(
+            centers, total, color="black", linewidth=0.4, alpha=0.20,
+            zorder=1,
+        )
+
+    # Stacked shading: bottom band is the inference contribution (from
+    # 0 up to the smoothed inference curve), top band is the FT
+    # contribution (gap from inference to total). Together they fill the
+    # area under the total curve, so the visual stack matches the
+    # tok/s budget at every instant.
     ax.fill_between(
-        centers, inf_per_s, total,
+        centers, 0, inf_smooth,
+        color=color_inf, alpha=0.20, linewidth=0,
+        label=f"Inference contribution (avg {inf_avg:.0f} tok/s)",
+        zorder=2,
+    )
+    ax.fill_between(
+        centers, inf_smooth, total_smooth,
         color=FT_SHADE_COLOR, alpha=0.30, hatch="//", linewidth=0,
         label=f"Finetune contribution (avg {ft_avg:.0f} tok/s)",
+        zorder=2,
     )
-    # Two curves on top.
+    # Two curves on top, plotted from the smoothed series. Inference
+    # curve outlines the boundary between the two shaded bands; total
+    # curve outlines the top.
     ax.plot(
-        centers, inf_per_s, color=color_inf, linewidth=1.4,
+        centers, inf_smooth, color=color_inf, linewidth=1.6,
         label=f"Inference (avg {inf_avg:.0f} tok/s)",
+        zorder=3,
     )
     ax.plot(
-        centers, total, color="black", linewidth=1.4,
+        centers, total_smooth, color="black", linewidth=1.6,
         label=f"Total (avg {tot_avg:.0f} tok/s)",
+        zorder=3,
     )
-    ax.set_title("Throughput (tokens/s)")
+    title = "Throughput (tokens/s)"
+    if win_s > bin_s:
+        title += f" — {win_s:.0f}s rolling mean"
+    ax.set_title(title)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Tokens / s")
     ax.legend(loc="best", fontsize=8)
@@ -308,6 +375,7 @@ def make_figure_for_mode(
     out_path: str,
     slo_s: float,
     window_s: float,
+    throughput_window_s: Optional[float] = None,
 ) -> None:
     """Build one 4-panel PNG for `mode` ∈ {'loose', 'tight', 'nutanix'}."""
     full_suffix = f"{base_suffix}_{mode}"
@@ -327,7 +395,9 @@ def make_figure_for_mode(
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
     plot_request_timeline(axes[0], timeline_df)
     plot_latency_vs_time_single(axes[1], results_df, label=mode, color=color)
-    plot_throughput_curves(axes[2], results_df, timeline_df, bwd_log, color_inf=color)
+    plot_throughput_curves(axes[2], results_df, timeline_df, bwd_log,
+                            color_inf=color,
+                            smoothing_window_s=throughput_window_s)
     plot_ttft_satisfaction_rate(axes[3], results_df, slo_s=slo_s, window_s=window_s)
 
     config_tag = base_suffix.lstrip("_") or "baseline"
@@ -385,6 +455,15 @@ def main():
         help="Rolling-window size (seconds) for the satisfaction-rate "
              "subplot. Default 5s.",
     )
+    ap.add_argument(
+        "--throughput-window", type=float, default=None,
+        help="Rolling-mean window (seconds) for the throughput subplot. "
+             "Default: auto-pick proportional to workload duration "
+             "(clipped to [5, 60]s) — short runs get small windows so "
+             "bursts stay visible, long runs get wider windows so "
+             "per-second spikes don't dominate. Set to 0 to disable "
+             "smoothing entirely (shows raw per-bin values).",
+    )
     args = ap.parse_args()
 
     # Resolve SLO: explicit --slo wins; else read from YAML; else fallback.
@@ -421,6 +500,7 @@ def main():
                 out_path=out_path,
                 slo_s=slo_s,
                 window_s=args.window,
+                throughput_window_s=args.throughput_window,
             )
             wrote += 1
         except FileNotFoundError as e:

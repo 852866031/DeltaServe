@@ -1,4 +1,4 @@
-from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator
+from dserve.common.unified_mem_allocator import UnifiedMemoryAllocator, PageType
 import torch
 import numpy as np
 import collections
@@ -9,6 +9,26 @@ from typing import List, Dict
 from dserve.common.mem_manager import MemoryManager
 from dserve.utils.infer_utils import mark_start, mark_end
 from dserve.utils.infer_utils import calculate_time
+
+
+# ─── Merge-trace debug toggle ────────────────────────────────────────
+# When True, every InferBatch.merge() call logs a one-line `[merge]`
+# marker showing both source dims and the allocator's KV-page count at
+# that moment. Pair with PackedKVMemoryAllocator._DEBUG_FREE to see
+# free events and merge events on the same timeline — KV climbing in
+# step with [merge] markers (without a matching [mem_free] event)
+# confirms merge is dropping live slot ids.
+#
+# We also emit a rough "expected KV" estimate based on in-flight
+# b_seq_len, so the "residual" (= actual KV pages held by the
+# allocator − pages strictly needed to back the in-flight tokens) is
+# directly visible. Zero or near-zero residual = no leak; growing
+# residual = orphaned slots.
+#
+# Off-path cost is one LOAD_GLOBAL + branch per merge — merges happen
+# at most a few times per second, so even when on the print cost is
+# negligible vs. the GPU work merge itself does.
+_DEBUG_MERGE = False
 
 
 class InferSamplingParams:
@@ -165,10 +185,17 @@ class InferBatch:
     
     @torch.no_grad()
     def free_self(self):
+        # b_loc_*[idx, max_len - seq_len : max_len] holds all seq_len KV
+        # slot ids for request idx. Previous code ended the slice at
+        # max_len - 1, leaking the slot at column max_len - 1 (the most
+        # recent prefill/decode allocation) — one K + one V sub-slot per
+        # finished request, never returned to the pool.
         remove_index = []
+        max_len = self.nopad_max_len_in_batch
         for idx in range(len(self)):
-            remove_index.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-            remove_index.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+            seq_len = self.nopad_b_seq_len[idx]
+            remove_index.append(self.nopad_b_loc_key[idx, max_len - seq_len : max_len])
+            remove_index.append(self.nopad_b_loc_value[idx, max_len - seq_len : max_len])
         remove_index = torch.cat(remove_index, dim=-1)
         self.mem_manager.free_kv(remove_index)
         return
@@ -204,11 +231,16 @@ class InferBatch:
             left_idx.append(idx)
         
         left_idx_set = set(left_idx)
+        # Slice covers all seq_len populated columns (was ending at
+        # max_len - 1, dropping the most recently allocated slot — see
+        # free_self comment for the leak details).
         remove_index_kv = []
+        max_len = self.nopad_max_len_in_batch
         for idx in range(len(self)):
             if idx not in left_idx_set:
-                remove_index_kv.append(self.nopad_b_loc_key[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
-                remove_index_kv.append(self.nopad_b_loc_value[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+                seq_len = self.nopad_b_seq_len[idx]
+                remove_index_kv.append(self.nopad_b_loc_key[idx, max_len - seq_len : max_len])
+                remove_index_kv.append(self.nopad_b_loc_value[idx, max_len - seq_len : max_len])
         remove_index_kv = torch.cat(remove_index_kv, dim=-1)
         self.mem_manager.free_kv(remove_index_kv)
 
@@ -272,18 +304,19 @@ class InferBatch:
         keep_tensor = torch.tensor(keep_indices, dtype=torch.long, device="cuda")
 
         # --- Step 2: free dropped requests' memory ---
+        # Slice covers all seq_len populated columns (was ending at
+        # max_len - 1, dropping the most recently allocated slot — see
+        # free_self comment for the leak details).
         if drop_indices:
             remove_index_kv = []
+            max_len = self.nopad_max_len_in_batch
             for idx in drop_indices:
+                seq_len = self.nopad_b_seq_len[idx]
                 remove_index_kv.append(
-                    self.nopad_b_loc_key[idx,
-                        (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
-                        (self.nopad_max_len_in_batch - 1)]
+                    self.nopad_b_loc_key[idx, max_len - seq_len : max_len]
                 )
                 remove_index_kv.append(
-                    self.nopad_b_loc_value[idx,
-                        (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
-                        (self.nopad_max_len_in_batch - 1)]
+                    self.nopad_b_loc_value[idx, max_len - seq_len : max_len]
                 )
             remove_index_kv = torch.cat(remove_index_kv, dim=-1)
             self.mem_manager.free_kv(remove_index_kv)
@@ -341,6 +374,8 @@ class InferBatch:
     @classmethod
     @torch.no_grad()
     def merge(cls, batch1, batch2):
+        if _DEBUG_MERGE:
+            cls._debug_print_merge_entry(batch1, batch2)
         requests = batch1.requests + batch2.requests
         requests_idx_mapping = {}
         new_batch_size = len(batch1) + len(batch2)
@@ -420,6 +455,56 @@ class InferBatch:
             mem_manager=batches[0].mem_manager,
             adapter_dirs=adapter_dirs,
             finetune_mask=None,
+        )
+
+    @staticmethod
+    def _debug_print_merge_entry(batch1, batch2) -> None:
+        """One-line `[merge]` marker. Reads:
+          - both source dims (so you can see when small mini-batches join a
+            big running batch),
+          - the allocator's current KV-page count (so you can correlate
+            with [mem_free] traces),
+          - the sub-slot demand implied by the in-flight b_seq_len totals
+            (so a growing gap = `actual − demand_pages` is the residual /
+            orphaned-slot count).
+
+        One GPU sync per merge (bincount + .tolist()). Merge fires only
+        when a new prefill mini-batch joins the running batch — at most
+        a few times per second — so the cost is irrelevant next to the
+        actual merge work."""
+        mm = batch1.mem_manager
+        # Per-type page histogram. Cheap (single bincount + 1 sync) and
+        # only runs when _DEBUG_MERGE is True.
+        try:
+            type_counts = torch.bincount(
+                mm.page_type_map.to(torch.long),
+                minlength=max(pt.value for pt in PageType) + 1,
+            ).tolist()
+            kv_pages = type_counts[PageType.KV_CACHE.value]
+        except Exception:
+            kv_pages = -1
+
+        # In-flight KV "demand": one K + one V sub-slot per token across
+        # both batches. Under packed_kv with packing factor F, that maps
+        # to ceil(2 * total_tokens / F) pages (lower bound — partial
+        # last pages may add up to F-1 sub-slots of slack).
+        try:
+            total_tokens = int(batch1.nopad_b_seq_len.sum().item()) + \
+                           int(batch2.nopad_b_seq_len.sum().item())
+            F = getattr(mm, "F", 1) or 1
+            # Two pools (K, V) of `total_tokens` sub-slots each.
+            demand_pages = (2 * total_tokens + F - 1) // F
+        except Exception:
+            total_tokens = -1
+            demand_pages = -1
+
+        residual = (kv_pages - demand_pages) if (kv_pages >= 0 and demand_pages >= 0) else "?"
+        print(
+            f"[merge] b1(len={len(batch1)}, max={batch1.nopad_max_len_in_batch}) "
+            f"+ b2(len={len(batch2)}, max={batch2.nopad_max_len_in_batch}) | "
+            f"alloc KV pages={kv_pages} | in-flight demand={demand_pages} "
+            f"({total_tokens} tokens, F={getattr(mm, 'F', 1)}) | "
+            f"residual={residual}"
         )
 
     def __len__(self):

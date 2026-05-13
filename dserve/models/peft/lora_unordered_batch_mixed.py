@@ -212,11 +212,27 @@ class LoraUnorderedBatchMixed:
                 dtype=torch.float16, device="cuda")
 
         if use_prefill_cg:
-            return self._prefill_with_cuda_graph(
+            predict_logics = self._prefill_with_cuda_graph(
                 batch_size, total_token_num, input_ids, infer_state,
                 self.batch_req_bins, no_lora_compute)
+        else:
+            predict_logics = self._context_forward(
+                input_ids, infer_state, no_lora_compute,
+                prefill_interrupt_event=prefill_interrupt_event)
 
-        predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, prefill_interrupt_event=prefill_interrupt_event)
+        # Free the prefill scratch slots that backed the padded positions
+        # `[total_token_num, alloc_size)`. They were allocated from the KV
+        # pool so the padded forward had somewhere to write throwaway K/V
+        # for padding tokens, but they're not registered in b_loc_key/value,
+        # so the request-finish cleanup (free_self / filter / clip) will
+        # never reclaim them. The captured graph doesn't pin these specific
+        # slot ids — `prefill_replay` overwrites the static index buffer
+        # with new ids on every replay — so freeing them here is safe.
+        if use_prefill_cg and alloc_size > total_token_num:
+            scratch_k = infer_state.prefill_mem_index_key[total_token_num:alloc_size]
+            scratch_v = infer_state.prefill_mem_index_value[total_token_num:alloc_size]
+            self.base_model.mem_manager.free_kv(scratch_k)
+            self.base_model.mem_manager.free_kv(scratch_v)
         return predict_logics
 
     def interrupt_and_clean(

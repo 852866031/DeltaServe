@@ -131,6 +131,10 @@ def plot_request_timeline(ax, timeline_df: pd.DataFrame):
     ax.set_ylabel("Requests / s", color=color_req)
     ax.tick_params(axis="y", labelcolor=color_req)
     ax.set_xlim(0, n_buckets)
+    # Anchor the left axis at 0 so empty seconds visibly sit on the
+    # baseline rather than getting padded below it by matplotlib's
+    # default margin.
+    ax.set_ylim(bottom=0)
     ax.set_title("Scheduled Request Timeline")
 
     ax2 = ax.twinx()
@@ -138,6 +142,9 @@ def plot_request_timeline(ax, timeline_df: pd.DataFrame):
              markersize=3, linewidth=1.5, label="tokens/s")
     ax2.set_ylabel("Output tokens / s", color=color_tok)
     ax2.tick_params(axis="y", labelcolor=color_tok)
+    # Right axis also starts at 0 so the two scales are visually
+    # comparable (both span [0, peak]).
+    ax2.set_ylim(bottom=0)
 
     # Combined legend so both axes' series show in one box.
     h1, l1 = ax.get_legend_handles_labels()

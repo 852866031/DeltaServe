@@ -39,13 +39,13 @@ _HERE = Path(__file__).resolve().parent
 # Which timeline to rescale. The default is the 5090 `live` schedule
 # because it's the one auto_benchmark picks up by default; swap to
 # A100/ or another mode if you want a different starting point.
-INPUT_CSV = _HERE / "5090" / "timeline_nutanix.csv"
+INPUT_CSV = _HERE / "A100" / "timeline_nutanix.csv"
 
 # RPS multiplier. Examples:
 #   2.0  → twice as many requests per second (same N reqs over half the time)
 #   0.5  → half as many requests per second (same N reqs over twice the time)
 #   1.0  → no-op (still writes a copy + a plot so you can sanity-check the path)
-SCALE_FACTOR = 0.85
+SCALE_FACTOR = 0.25
 
 # Output paths are derived from INPUT_CSV + SCALE_FACTOR so multiple
 # scalings of the same source don't clobber each other.

@@ -32,7 +32,11 @@ import aiohttp
 import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CONFIG_DIR = SCRIPT_DIR / "config"
+# Script lives under llama3/scripts/; config, adapters, data, etc. are
+# one level up.
+PROJECT_DIR = SCRIPT_DIR.parent
+CONFIG_DIR = PROJECT_DIR / "config"
+ADAPTERS_DIR = PROJECT_DIR / "adapters"
 
 PROMPTS = [
     "Once upon a time in a quiet village, there lived",
@@ -71,13 +75,25 @@ def _yaml_lit(v) -> str:
     return yaml.safe_dump(v, default_flow_style=True).strip()
 
 
-def build_command(config_path: Path, port: int) -> List[str]:
+def build_command(config_path: Path, port: int,
+                  allocator: Optional[str] = None) -> List[str]:
+    """`allocator` is the value to pass to memory.allocator
+    ("unified" or "packed_kv"). None leaves the YAML's default in place."""
     abs_paths = resolve_paths(config_path)
     overrides = [
         f"finetune.data_path={abs_paths['ft_data_path']}",
         f"finetune.lora_path={abs_paths['ft_lora_path']}",
         f"lora.adapter_dirs={_yaml_lit(abs_paths['adapter_dirs'])}",
+        # All CUDA graphs on so both runs exercise the same fast path.
+        # The point of the harness is to verify allocator equivalence,
+        # which has to hold under the production-realistic config — not
+        # the eager fallback. Both runs see identical graph flags.
+        "cuda_graph.enable_decode_cuda_graph=true",
+        "cuda_graph.enable_prefill_cuda_graph=true",
+        "cuda_graph.enable_bwd_cuda_graph=true",
     ]
+    if allocator is not None:
+        overrides.append(f"memory.allocator={allocator}")
     parts = [
         sys.executable, "-u", "-m", "dserve.server.api_server",
         "--config", str(config_path),
@@ -154,10 +170,12 @@ def terminate_server(p: Optional[subprocess.Popen]) -> None:
 
 async def run_one(config_path: Path, port: int, base_model: str,
                   lora_dir: str, max_new_tokens: int,
-                  show_server_log: bool) -> List[Dict]:
+                  show_server_log: bool,
+                  allocator: Optional[str] = None) -> List[Dict]:
     server = f"http://127.0.0.1:{port}"
-    cmd = build_command(config_path, port)
-    print(f"\n[{config_path.name}] launching api_server on port {port} ...")
+    cmd = build_command(config_path, port, allocator=allocator)
+    tag_suffix = f" (allocator={allocator})" if allocator else ""
+    print(f"\n[{config_path.name}{tag_suffix}] launching api_server on port {port} ...")
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -180,18 +198,22 @@ async def run_one(config_path: Path, port: int, base_model: str,
             raise RuntimeError(
                 f"server with {config_path.name} did not become ready"
             )
-        print(f"[{config_path.name}] ready, sending {len(PROMPTS)} prompts")
+        print(f"[{config_path.name}] ready, sending {len(PROMPTS)} prompts concurrently")
 
-        responses = []
-        for i, prompt in enumerate(PROMPTS):
-            resp = await send_prompt(server, base_model, lora_dir, prompt,
-                                     max_new_tokens)
+        # Fan out all prompts at once so the server sees them as a real
+        # multi-request batch (exercises batched prefill + decode through
+        # both allocators). asyncio.gather preserves call order in the
+        # returned list, so the response slice still aligns with PROMPTS.
+        responses = await asyncio.gather(*(
+            send_prompt(server, base_model, lora_dir, p, max_new_tokens)
+            for p in PROMPTS
+        ))
+        for i, (prompt, resp) in enumerate(zip(PROMPTS, responses)):
             text = resp.get("generated_text", [""])[0]
             ntok = resp.get("count_output_tokens")
             print(f"  prompt {i}: {prompt!r}")
             print(f"  output  : {text!r} (tokens={ntok})")
-            responses.append(resp)
-        return responses
+        return list(responses)
     finally:
         print(f"[{config_path.name}] shutting down ...")
         terminate_server(p)
@@ -236,13 +258,16 @@ def diff_responses(a: List[Dict], b: List[Dict]) -> bool:
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg_unified",
-                    default=str(CONFIG_DIR / "serving_config_finetuning.yaml"))
-    ap.add_argument("--cfg_packed",
-                    default=str(CONFIG_DIR / "serving_config_finetuning_packed.yaml"))
+    # Single YAML now — the previous `serving_config_finetuning_packed.yaml`
+    # was folded into the default `serving_config_finetuning.yaml`. Both
+    # allocators are exercised by overriding `memory.allocator` at launch.
+    ap.add_argument("--cfg",
+                    default=str(CONFIG_DIR / "serving_config_finetuning.yaml"),
+                    help="Server YAML to launch under. memory.allocator is "
+                         "overridden per run.")
     ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
     ap.add_argument("--lora_dir",
-                    default=str(SCRIPT_DIR / "adapters" / "llama3-toy-lora"))
+                    default=str(ADAPTERS_DIR / "llama3-toy-lora"))
     ap.add_argument("--port_a", type=int, default=9101)
     ap.add_argument("--port_b", type=int, default=9102)
     ap.add_argument("--max_new_tokens", type=int, default=32)
@@ -250,26 +275,26 @@ async def main():
                     help="hide server stdout (default: stream it)")
     args = ap.parse_args()
 
-    cfg_a = Path(args.cfg_unified).resolve()
-    cfg_b = Path(args.cfg_packed).resolve()
-    for p in (cfg_a, cfg_b):
-        if not p.exists():
-            print(f"missing config: {p}", file=sys.stderr)
-            sys.exit(2)
+    cfg = Path(args.cfg).resolve()
+    if not cfg.exists():
+        print(f"missing config: {cfg}", file=sys.stderr)
+        sys.exit(2)
 
     show_log = not args.quiet_server
 
     print("=" * 70)
-    print(f"Run A (unified): {cfg_a}")
+    print(f"Run A (unified):  {cfg}  --override memory.allocator=unified")
     print("=" * 70)
-    resp_a = await run_one(cfg_a, args.port_a, args.base_model,
-                           args.lora_dir, args.max_new_tokens, show_log)
+    resp_a = await run_one(cfg, args.port_a, args.base_model,
+                           args.lora_dir, args.max_new_tokens, show_log,
+                           allocator="unified")
 
     print("\n" + "=" * 70)
-    print(f"Run B (packed_kv): {cfg_b}")
+    print(f"Run B (packed_kv): {cfg}  --override memory.allocator=packed_kv")
     print("=" * 70)
-    resp_b = await run_one(cfg_b, args.port_b, args.base_model,
-                           args.lora_dir, args.max_new_tokens, show_log)
+    resp_b = await run_one(cfg, args.port_b, args.base_model,
+                           args.lora_dir, args.max_new_tokens, show_log,
+                           allocator="packed_kv")
 
     ok = diff_responses(resp_a, resp_b)
     sys.exit(0 if ok else 1)
