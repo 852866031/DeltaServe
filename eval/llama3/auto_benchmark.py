@@ -13,6 +13,7 @@ orchestrate_run_timeline.py
 import argparse
 import asyncio
 import csv
+import datetime
 import json
 import os
 import re
@@ -251,6 +252,50 @@ def write_results_csv(path: str, rows: List[Tuple[int, float, float, str, Option
     print(f"[orchestrator] Wrote results CSV: {path}", flush=True)
 
 
+def trim_bwd_log_before(path: str, cutoff: datetime.datetime) -> Tuple[int, int]:
+    """Strip rows from `path` whose `timestamp` column is strictly before
+    `cutoff` (compared as ISO-8601-second strings — the same format the
+    server uses in `finetuning_store.write_bwd_logs_csv`). Rewrites the
+    file in place. Returns (kept, total).
+
+    Why string comparison: bwd_log writes `timestamp` via
+    `datetime.now().isoformat(timespec="seconds")` → `YYYY-MM-DDTHH:MM:SS`.
+    These strings sort lexicographically the same as their datetime
+    counterparts, so a `>= cutoff_str` comparison is exact and avoids
+    parsing every row.
+
+    Inclusivity: the cutoff is floored to the same-second precision the
+    bwd log uses, so rows recorded in the *same second* as `cutoff` are
+    kept (post-warmup batches that happened to complete just before the
+    first request landed). Earlier-second rows are dropped.
+    """
+    if not os.path.exists(path):
+        print(f"[orchestrator] Skipping bwd-log trim: {path} does not exist", flush=True)
+        return (0, 0)
+
+    cutoff_iso = cutoff.replace(microsecond=0).isoformat(timespec="seconds")
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        all_rows = list(reader)
+    total = len(all_rows)
+    if not fieldnames or "timestamp" not in fieldnames:
+        print(f"[orchestrator] Skipping bwd-log trim: {path} has no 'timestamp' column", flush=True)
+        return (total, total)
+
+    kept = [r for r in all_rows if (r.get("timestamp") or "") >= cutoff_iso]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    print(
+        f"[orchestrator] Trimmed bwd log {path}: kept {len(kept)}/{total} rows "
+        f"(cutoff T = {cutoff_iso}, dropped {total - len(kept)} pre-warmup row(s))",
+        flush=True,
+    )
+    return (len(kept), total)
+
+
 WARMUP_START_OFFSET_S = 1.0
 
 
@@ -336,16 +381,24 @@ async def run_timeline_requests(
     stop_event: asyncio.Event,
     normalize_start: bool = True,
     request_timeout_s: float = 600.0,
-) -> List[Tuple[int, float, float, str, Optional[float], Optional[float], Optional[float]]]:
+) -> Tuple[
+    List[Tuple[int, float, float, str, Optional[float], Optional[float], Optional[float]]],
+    Optional[datetime.datetime],
+]:
     """
     Schedule requests according to timeline timestamp_s.
 
-    Returns list of rows for results CSV:
-      (idx, t_rel_s, latency_s, status, ttft_s, avg_tbt_s, worst_tbt_s)
+    Returns:
+      results: list of rows for results CSV
+        (idx, t_rel_s, latency_s, status, ttft_s, avg_tbt_s, worst_tbt_s)
+      t_first_wall: wall-clock datetime captured at `t0`, i.e. the moment
+        the scheduler arms the first request. Used by the caller to trim
+        pre-timeline rows from the bwd-log CSV (which timestamps in
+        wall-clock ISO-second strings). None if there were no rows.
     """
     if not timeline_rows:
         print("[orchestrator] No timeline rows to run.", flush=True)
-        return []
+        return [], None
 
     connector = aiohttp.TCPConnector(limit=0)
     timeout = aiohttp.ClientTimeout(total=request_timeout_s)
@@ -362,7 +415,13 @@ async def run_timeline_requests(
         timeout=timeout,
     ) as session:
         t0 = time.monotonic()
+        # Wall-clock anchor for filtering the bwd_log later. Captured at
+        # the same instant as `t0`; for normalized timelines the first
+        # row has target_rel == 0, so this is within microseconds of the
+        # first request actually going out.
+        t_first_wall = datetime.datetime.now()
         print(f"[orchestrator] Timeline start (normalize={normalize_start}, base_ts={base_ts:.6f})", flush=True)
+        print(f"[orchestrator]   wall-clock anchor T = {t_first_wall.isoformat(timespec='seconds')}", flush=True)
         print(f"[orchestrator] Scheduling {len(timeline_rows)} requests "
               f"(total schedule duration: {total_duration:.2f}s)", flush=True)
 
@@ -449,7 +508,7 @@ async def run_timeline_requests(
     # Sort by idx for stable CSV order like the sample
     results.sort(key=lambda x: x[0])
     print("[orchestrator] Timeline completed ✅", flush=True)
-    return results
+    return results, t_first_wall
 
 
 # ----------------------------
@@ -757,6 +816,20 @@ async def main() -> None:
             flush=True,
         )
 
+        # Start finetuning BEFORE warmup. Warmup requests + the post-warmup
+        # timeline both run with FT live in the background. The bwd_log
+        # written by the server therefore covers the entire run; we trim
+        # the warmup-window rows out after the benchmark using the
+        # wall-clock anchor `T` recorded at the timeline start.
+        if args.co:
+            print("[orchestrator] Starting finetuning (pre-warmup)...", flush=True)
+            async with aiohttp.ClientSession() as session:
+                ok = await start_finetuning(session, server)
+                if not ok:
+                    print("[orchestrator] Failed to start finetuning", flush=True)
+                    return
+                print("[orchestrator] Finetuning started ✅", flush=True)
+
         if warmup_rows:
             await run_warmup_requests(
                 server=server,
@@ -768,25 +841,18 @@ async def main() -> None:
             if stop_event.is_set():
                 return
 
-            print(f"[orchestrator] Resting {args.warmup_rest_s:.2f}s after warmup...", flush=True)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=args.warmup_rest_s)
-                return
-            except asyncio.TimeoutError:
-                pass
-
-        # Start finetuning after warmup+rest, before schedule
-        if args.co:
-            print("[orchestrator] Starting finetuning...", flush=True)
-            async with aiohttp.ClientSession() as session:
-                ok = await start_finetuning(session, server)
-                if not ok:
-                    print("[orchestrator] Failed to start finetuning", flush=True)
+            if args.warmup_rest_s > 0:
+                print(f"[orchestrator] Resting {args.warmup_rest_s:.2f}s after warmup...", flush=True)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=args.warmup_rest_s)
                     return
-                print("[orchestrator] Finetuning started ✅", flush=True)
+                except asyncio.TimeoutError:
+                    pass
 
-        # Run full timeline (including warmup rows again)
-        results = await run_timeline_requests(
+        # Run full timeline (including warmup rows again). `t_first_wall`
+        # is the wall-clock at the timeline's t0 — used below to trim
+        # warmup-window rows out of the bwd_log.
+        results, t_first_wall = await run_timeline_requests(
             server=server,
             base_model=args.base_model,
             lora_dir=args.lora_dir,
@@ -798,7 +864,9 @@ async def main() -> None:
         # Write CSV (scheduled phase only)
         write_results_csv(args.out_csv, results)
 
-        # Exit finetuning after schedule
+        # Exit finetuning after schedule. This also triggers the server to
+        # flush `bwd_log.csv` (via finetuning_manager.write_bwd_logs_csv),
+        # so the trim below sees a complete file.
         if args.co and not stop_event.is_set():
             print("[orchestrator] Exiting finetuning...", flush=True)
             async with aiohttp.ClientSession() as session:
@@ -806,6 +874,12 @@ async def main() -> None:
                 print("[orchestrator] Exited finetuning ✅" if ok else "[orchestrator] Failed to exit finetuning", flush=True)
 
         await asyncio.sleep(0.5)
+
+        # Trim pre-warmup rows out of the bwd_log. The server records bwd
+        # batches across the whole run (warmup + timeline); for the
+        # benchmark we only want the timeline-phase rows.
+        if args.co and t_first_wall is not None:
+            trim_bwd_log_before(args.ft_log_path, t_first_wall)
 
     except KeyboardInterrupt:
         if p is not None:
