@@ -46,7 +46,7 @@ scheduler:
 memory:
   enable_unified_mem_manager: true
   unified_mem_manager_max_size_gb: 3.5
-  max_finetuning_tokens: 512
+  max_finetuning_tokens: 256
   unified_mem_manager_log_path: null
   allocator: packed_kv
 
@@ -70,7 +70,7 @@ finetune:
   learning_rate: 0.000005
   weight_decay: 0.01
   gamma: 0.9
-  max_saved_finetuning_tokens: 512
+  max_saved_finetuning_tokens: 256
   max_finetuning_tokens_in_batch: 128
   optimizer_threading: true
   start_on_launch: false
