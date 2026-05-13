@@ -128,9 +128,16 @@ if __name__ == "__main__":
                              "total pages) once per second and writes a CSV "
                              "to this path. Override path becomes the value "
                              "of memory.unified_mem_manager_log_path.")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Override the YAML config path. If omitted, the "
+                             "default FT or no-FT config is picked from "
+                             "--enable-finetuning.")
     args = parser.parse_args()
 
-    config_path = SERVING_CONFIG_FT if args.enable_finetuning else SERVING_CONFIG_NOFT
+    if args.config:
+        config_path = Path(args.config)
+    else:
+        config_path = SERVING_CONFIG_FT if args.enable_finetuning else SERVING_CONFIG_NOFT
     abs_paths = resolve_paths(config_path)
 
     overrides = [

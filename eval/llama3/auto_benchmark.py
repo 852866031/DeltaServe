@@ -615,6 +615,11 @@ async def main() -> None:
     ]
     if args.co:
         cmd.append("--enable-finetuning")
+        if args.timeline_gpu == "A100":
+            a100_cfg = SCRIPT_DIR / "config" / "serving_config_finetuning_A100.yaml"
+            cmd.append("--config")
+            cmd.append(str(a100_cfg))
+            print(f"[orchestrator] A100 detected — using {a100_cfg.name}", flush=True)
     if args.decode_graph:
         cmd.append("--enable-cuda-graph")
     if args.prefill_graph:
