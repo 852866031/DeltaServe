@@ -88,7 +88,7 @@ if __name__ == "__main__":
     prompt_length = 80
     max_new_tokens = 80
     total_cycles = 8
-    peak_rps = [15]
+    peak_rps = [14]
     valley_rps = [0]
 
     initial_idle = 1.0
