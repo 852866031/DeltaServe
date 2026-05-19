@@ -70,6 +70,14 @@ Reasoning:
   legacy V0 engine is being removed. Everything below assumes `vllm/v1/`
   internals: `vllm/v1/engine/core.py` (`EngineCore`/`EngineCoreProc`),
   `vllm/v1/core/sched/scheduler.py`, `vllm/v1/worker/gpu_model_runner.py`.
+- **Stay on V1 as much as possible.** Build *everything* against the V1 paths
+  (`vllm/v1/...`) and avoid touching or depending on the legacy V0 engine
+  (`vllm/engine/llm_engine.py`, `async_llm_engine.py`, V0 executor/worker). V0
+  is on its way out, so any work tied to it is dead on arrival; the only
+  V0-adjacent file we legitimately touch is the shared config entry
+  `vllm/engine/arg_utils.py` (`EngineArgs`), which both engines reuse. If a
+  feature seems to require the V0 path, treat that as a signal to re-check the
+  V1 equivalent before writing code against V0.
 - **Fork from a tag, not `main`.** Because we develop on our own fork, we can
   edit vLLM internals directly (subclass where clean, patch source where not) —
   the scheduler, the model runner, and model definitions are not stable public
