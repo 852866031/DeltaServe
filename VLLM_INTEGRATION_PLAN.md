@@ -2,21 +2,29 @@
 
 ## 0. Purpose & framing
 
-DeltaServe is today a **fork of LightLLM** (the `TpPartBaseModel` /
-`layer_infer/` / `infer_struct` / `mem_manager` / `triton_kernel` layout is
-LightLLM's, vendored without an explicit import) with a co-serving layer bolted
-on: it interleaves a LoRA SFT **backward pass** with ongoing **inference** on
-the same GPU, in a **separate process**, gated by an SLO-aware scheduler.
+DeltaServe is an **LLM co-serving framework**: it interleaves a LoRA SFT
+**backward pass** with ongoing **inference** on the same GPU, running the
+backward work in a **separate process** and gated by an **SLO-aware scheduler**
+so finetuning soaks up GPU slack without blowing inference TTFT/latency. The
+core ideas are:
+
+- Inject finetuning samples into ordinary inference batches, marked so the
+  forward pass can tell them apart from inference tokens.
+- Capture the finetuning samples' activations during that forward pass into
+  pre-allocated buffers.
+- Hand those activations to a backward process that trains a dedicated LoRA
+  adapter, yielding the GPU back to inference at every layer boundary.
+- A scheduler + cost estimator decide, each step, how much finetuning work to
+  admit without violating inference SLOs.
 
 The goal of this document is to plan re-implementing that co-serving layer **on
-top of vLLM's V1 engine** instead of LightLLM. The strategic bet is that vLLM
-already gives us, for free, the two hardest pieces of infrastructure DeltaServe
-had to build by hand:
+top of vLLM's V1 engine**, developed on **our own fork of vLLM**. The strategic
+bet is that vLLM already gives us, for free, the two hardest pieces of
+infrastructure DeltaServe had to build by hand:
 
 1. **A production multi-LoRA batching pipeline** (punica/S-LoRA-style kernels,
-   adapter pool, per-token adapter dispatch) — DeltaServe's
-   `lora_unordered_batch_mixed.py` + `naive_infer_adapter.py` + custom BGMV
-   dispatch is exactly what vLLM's LoRA subsystem already does.
+   adapter pool, per-token adapter dispatch) — equivalent to DeltaServe's
+   custom multi-LoRA inference pipeline.
 2. **A multi-process engine with a real scheduler and continuous batching** —
    vLLM V1 already runs the scheduler + model executor in a dedicated
    `EngineCore` process, with token-budget continuous batching.
@@ -28,32 +36,32 @@ vLLM's inference + LoRA + scheduling substrate."
 
 ### What DeltaServe brings (the value-add to port)
 
-| Component | DeltaServe location | Disposition on vLLM |
+| Component | DeltaServe role | Disposition on vLLM |
 |---|---|---|
-| Multi-LoRA inference batching (S-LoRA) | `dserve/models/peft/lora_unordered_batch_mixed.py`, `naive_infer_adapter.py` | **Replaced** by vLLM native multi-LoRA |
-| LightLLM base model + KV mem manager | `dserve/models/{llama,llama3}/`, `dserve/common/*mem*` | **Replaced** by vLLM model + paged KV |
-| Two-process launch + GPU buffer sharing + pause event | `model_rpc.py:150-181`, `SFT_service.py:120-191` | **Ported** (adapted to vLLM's worker process) |
-| Finetuning sample store | `dserve/server/router/finetuning_store.py` | **Ported** ~as-is (pure Python) |
-| FT injection into batches + `finetune_mask` | `mixed_req_queue.py:307-400`, `infer_batch.py`, `lora_unordered_batch_mixed.py:138-236` | **Ported** into vLLM scheduler + input prep |
-| Activation capture (attn out / FFN out / logits) | `unified_mem_allocator.py:303-380`, `lora_unordered_batch_mixed.py:394-421`, `post_layer_infer.py:60-91` | **Re-implemented** as forward hooks on vLLM model |
-| Backward SFT service (LoRA grads, optimizer, CUDA-graphed backward) | `dserve/models/{llama,llama3}/SFT_service*.py` | **Ported** ~as-is (PyTorch, framework-agnostic) |
-| SLO-aware scheduler + 3-regime estimator + tracker | `mixed_req_queue.py`, `tracker.py`, `graph_eligibility.py` | **Ported** as a layer on vLLM's V1 scheduler |
-| Allocators / occupancy / packed-KV | `dserve/common/*allocator*.py` | **Dropped** initially; vLLM owns KV. Revisit only for FT activation pool |
+| Multi-LoRA inference batching | Custom inference pipeline + adapter pool | **Replaced** by vLLM native multi-LoRA |
+| Base model + KV memory manager | Custom model + paged KV allocators | **Replaced** by vLLM model + paged KV |
+| Two-process launch + GPU buffer sharing + pause event | Spawns the backward process, shares activation buffers, pause-event contract | **Ported** (adapted to vLLM's worker process) |
+| Finetuning sample store | Loads + tokenizes FT samples at startup, length-bucketed selection | **Ported** ~as-is (pure Python) |
+| FT injection into batches + `finetune_mask` | Adds FT samples to batches and marks their tokens | **Ported** into vLLM scheduler + input prep |
+| Activation capture (attn out / FFN out / logits) | Saves FT-only activations into shared buffers during forward | **Re-implemented** as forward hooks on vLLM model |
+| Backward SFT service (LoRA grads, optimizer, CUDA-graphed backward) | The actual finetuning backward pass | **Ported** ~as-is (PyTorch, framework-agnostic) |
+| SLO-aware scheduler + 3-regime estimator + tracker | Decides FT admission per step under SLOs | **Ported** as a layer on vLLM's V1 scheduler |
+| Allocators / occupancy / packed-KV | Custom KV/activation pool management | **Dropped** initially; vLLM owns KV. Revisit only for FT activation pool |
 
-The backward pass itself (`SFT_service.py`, `SFT_service_graph.py`) is the part
-that is *least* coupled to LightLLM — it operates on saved activation tensors
-and LoRA fp32 weights with plain PyTorch + CUDA graphs. That code ports almost
-verbatim; the work is in *feeding* it from vLLM.
+The backward pass itself is the part that is *least* coupled to any particular
+inference engine — it operates on saved activation tensors and fp32 LoRA
+weights with plain PyTorch + CUDA graphs. That code ports almost verbatim; the
+work is in *feeding* it from vLLM.
 
 ---
 
 ## 1. vLLM target: version and build mode
 
-### 1.1 Version — pin a recent stable V1 tag
+### 1.1 Version — fork from a recent stable V1 tag
 
-**Recommendation: pin to a specific recent stable release tag where the V1
-engine is the default and mature (the v0.10.x line or the nearest stable tag at
-project start), not `main`.**
+**Recommendation: fork vLLM from a specific recent stable release tag where the
+V1 engine is the default and mature (the v0.10.x line or the nearest stable tag
+at project start), not from `main`.**
 
 Reasoning:
 
@@ -62,18 +70,19 @@ Reasoning:
   legacy V0 engine is being removed. Everything below assumes `vllm/v1/`
   internals: `vllm/v1/engine/core.py` (`EngineCore`/`EngineCoreProc`),
   `vllm/v1/core/sched/scheduler.py`, `vllm/v1/worker/gpu_model_runner.py`.
-- **Pin, don't track `main`.** We are going to monkeypatch / subclass internal,
-  non-public classes (the scheduler, the model runner, model definitions). vLLM
-  refactors these aggressively between minor releases. A pinned tag freezes the
-  blast radius; upgrading becomes a deliberate, tested step rather than a daily
-  surprise.
+- **Fork from a tag, not `main`.** Because we develop on our own fork, we can
+  edit vLLM internals directly (subclass where clean, patch source where not) —
+  the scheduler, the model runner, and model definitions are not stable public
+  APIs and we will be modifying them. Branching from a fixed release tag freezes
+  the baseline; rebasing onto a newer upstream tag becomes a deliberate, tested
+  step rather than absorbing daily upstream churn.
 - **Confirm at project start** which is the latest stable tag whose V1 path
   supports everything we need (multi-LoRA + the model family you target). Verify
-  on a smoke test before committing the pin.
+  on a smoke test before branching the fork.
 
 Action item for whoever starts this: run `pip index versions vllm` (or check the
-releases page) and pick the newest stable tag, then record it in
-`requirements`/`pyproject` as an exact `==` pin.
+releases page), pick the newest stable tag, and create the fork's working branch
+off that tag.
 
 ### 1.2 Build mode — **Python-only (precompiled), not full source build**
 
@@ -192,7 +201,138 @@ Key insertion points for DeltaServe:
 
 ---
 
-## 3. Phased build plan
+## 3. DeltaServe → vLLM, walked through DeltaServe's own structure
+
+This section is for reading vLLM *through DeltaServe's eyes*. We take
+DeltaServe's architecture — the one in `CLAUDE.md` — box by box, and for each
+box name the vLLM file/class that plays the same role, what's different, and
+where the seams don't line up. Anchor diagram (DeltaServe):
+
+```
+ api_server.py                   ── HTTP + ServerConfig load
+      │
+      ▼
+ router/manager.py               ── scheduler loop; picks inference batches,
+                                    interleaves backward micro-batches,
+                                    enforces co-serving policy
+      │
+      ▼
+ router/model_infer/model_rpc.py ── owns the GPU process; constructs the
+                                    forward runner + the backward service
+      │
+      ├── forward/inference runner (graph-captured decode optional)
+      └── backward service (SFT)
+```
+
+vLLM's equivalent spine (you'll see these names below):
+
+```
+ entrypoints/openai/api_server.py ── HTTP
+      │
+      ▼
+ v1/engine/async_llm.py (AsyncLLM)        ── frontend, in the API process
+      │  ZMQ
+      ▼
+ v1/engine/core.py (EngineCoreProc)       ── separate process: scheduler + executor driver
+      │
+      ▼
+ v1/core/sched/scheduler.py (Scheduler)   ── builds one token-budget batch per step
+      │
+      ▼
+ v1/executor → v1/worker/gpu_worker.py    ── separate process(es): own the GPU
+      │
+      ▼
+ v1/worker/gpu_model_runner.py            ── input prep + forward + sampling
+```
+
+> Paths are for the V1 engine around the v0.10 line and **will drift** between
+> releases — that's exactly why §1.1 says fork from a pinned tag. Treat them as
+> "look here," not gospel.
+
+### 3.1 Box-by-box mapping
+
+| DeltaServe (what you know) | Role | vLLM counterpart | Key difference |
+|---|---|---|---|
+| `api_server.py` | HTTP entry, loads `ServerConfig`, spawns subprocesses | `vllm/entrypoints/openai/api_server.py` + `vllm/v1/engine/async_llm.py` (`AsyncLLM`) | In vLLM the HTTP layer and the engine live in **different processes** by default, talking over ZMQ. DeltaServe's `api_server.main()` fans config out by spawning; vLLM's `AsyncLLM` launches the `EngineCore` process for you. |
+| `dserve/server/config.py` (`ServerConfig` + sections) | One typed config object, validated, fanned out to subprocesses | `vllm/engine/arg_utils.py` (`EngineArgs`) → `vllm/config.py` (`VllmConfig` with `ModelConfig`, `CacheConfig`, `SchedulerConfig`, `LoRAConfig`, `ParallelConfig`, …) | Same idea (one validated config, sub-sections). vLLM splits it into many dataclasses and builds from CLI/`EngineArgs` rather than a single YAML. Our new finetuning knobs become a new sub-config we add on the fork (analogue of your `finetune`/`slo`/`cuda_graph` sections). |
+| `router/manager.py` (the `_co_serving_step` loop) | The driving loop: decide prefill vs decode vs FT admission, drive the GPU, drain captures | `vllm/v1/engine/core.py` (`EngineCore.step()` / `EngineCoreProc`) | vLLM's core loop calls `Scheduler.schedule()` then `executor.execute_model()` then `update_from_output()`. **There is no separate "prefill batch then N decode steps"** — see §3.3. Our co-serving loop logic gets folded into this step loop on the fork. |
+| `router/mixed_req_queue.py` (`generate_new_batch`, SLO gates) | Decides *what goes in the batch* this iteration | `vllm/v1/core/sched/scheduler.py` (`Scheduler.schedule()` → `SchedulerOutput` in `sched/output.py`) | This is the single most important mapping. vLLM's `Scheduler` is where our FT-admission gate + SLO logic must live. It already does token-budget continuous batching; we extend it to also admit FT tokens. |
+| `router/tracker.py` (estimators + `BatchExecutionTracker`) | Predict batch execution time; SLO math | *No equivalent* | vLLM has no execution-time estimator. We **add** this as-is alongside the `Scheduler` on the fork. |
+| `router/graph_eligibility.py` (capture mirror) | Tells the scheduler whether a batch will hit a captured graph | *Partial* — vLLM owns cudagraph dispatch internally (`vllm/compilation/`) | vLLM decides graph vs eager itself; there's no manager/runner mirror to keep in sync because scheduler and runner aren't split the same way. Much of this complexity *disappears*; what remains is "is this step eager?" which we control via the FT-runs-eager rule. |
+| `router/model_infer/model_rpc.py` | Owns the GPU process; builds the forward runner + backward service; the RPC surface | `vllm/v1/worker/gpu_worker.py` (`Worker`) + `vllm/v1/executor/*` | The vLLM `Worker` is the GPU-owning process. **This is where we spawn the backward process** (§ Phase 1), the same way `model_rpc` does. The executor abstraction handles TP/multi-worker fan-out that DeltaServe does more manually. |
+| forward/inference runner | Input layout + forward + (optional) graph | `vllm/v1/worker/gpu_model_runner.py` (`GPUModelRunner.execute_model`) | Combines what DeltaServe splits across `infer_batch.py` (token layout, `b_loc`, mem indices) and the forward path. Our activation-capture hooks and `finetune_mask` plumbing land here. |
+| `models/peft/lora_unordered_batch_mixed.py` | Multi-LoRA batched forward, per-token adapter dispatch, **+ FT mask + activation save** | LoRA half → `vllm/lora/` (`models.py` `LoRAModelManager`, `worker_manager.py`, `punica_wrapper/`); forward half → the model in `vllm/model_executor/models/` | This one DeltaServe file does **two jobs** that vLLM splits: (a) multi-LoRA batching — fully replaced by vLLM's LoRA subsystem; (b) the FT-specific bits (mask, activation capture, FT-vs-inference logits) — these have **no vLLM equivalent** and are what we re-implement as hooks. |
+| `models/peft/naive_infer_adapter.py` | The adapter weight pool (a_start/a_len, packed A/B) | `vllm/lora/punica_wrapper/` + `vllm/lora/models.py` (the LoRA weight buffers / slots) | vLLM has a mature equivalent (LRU adapter cache, slot management). Replaced wholesale. Our "dedicated FT adapter" is just one more registered LoRA here. |
+| `models/{llama,llama3}/` (layer_infer, model.py) | The actual transformer | `vllm/model_executor/models/llama.py` (`LlamaModel`/`LlamaForCausalLM`) | Replaced by vLLM's model definitions. We subclass/patch the arch model to add forward hooks for activation capture (FT only). |
+| `infer_batch.py` (`InferBatch.init_batch`, token layout) | Logical batch → GPU tensor layout (`input_ids`, `b_start_loc`, `b_seq_len`, `finetune_mask`) | `vllm/v1/worker/gpu_model_runner.py` input-prep + `vllm/v1/core/sched/output.py` | vLLM builds the flattened token tensors and metadata in the model runner from `SchedulerOutput`. Our `finetune_mask` gets built here. |
+| `common/unified_mem_allocator.py`, `packed_kv_mem_allocator.py`, `allocator_factory.py` | KV pool **and** FT activation/logit buffers | KV half → `vllm/v1/core/kv_cache_manager.py` + `vllm/v1/core/block_pool.py` | vLLM owns paged KV entirely — we drop DeltaServe's KV allocators. **But vLLM's KV manager does *not* manage FT activation buffers** — that part has no equivalent, so we keep a small dedicated activation-buffer allocator (the shared buffers from Phase 1/2). Note: `packed_kv`'s reason to exist (GQA KV oversizing) is moot — vLLM stores KV at `num_kv_heads` natively. |
+| `common/cuda_graph_runner.py` | Forward CUDA-graph capture/replay + bucketing | `vllm/compilation/*` + the model runner's piecewise cudagraph (via `torch.compile`) | vLLM captures graphs through its compile backend, not a hand-rolled bucket cache. We don't port this; we only need the rule "FT steps run eager." |
+| `models/{llama,llama3}/SFT_service*.py` (backward) | The LoRA SFT backward pass + backward CUDA graphs | *No equivalent* | vLLM is inference-only. The backward service is **pure DeltaServe**, ported ~verbatim into the backward process (it's framework-agnostic PyTorch). |
+| `router/finetuning_store.py` | Loads/tokenizes FT samples at startup; length-bucketed selection | *No equivalent* | **Added** ~as-is. |
+
+### 3.2 The two big "shapes" to internalize
+
+1. **DeltaServe splits "loop control" from "batch contents"; vLLM splits
+   "scheduling" from "execution."**
+   - DeltaServe: `manager.py` runs the loop and *calls* `mixed_req_queue.py` to
+     fill the batch; both run in the router process, and `model_rpc.py` owns a
+     *separate* GPU process reached by RPC.
+   - vLLM: `Scheduler` (decides) and `GPUModelRunner` (executes) are the split,
+     and they sit in **different processes** (`EngineCore` vs `Worker`)
+     connected by the executor. So "what goes in the batch" (your
+     `mixed_req_queue`) and "lay out the tensors + forward" (your `infer_batch`
+     + forward runner) end up on **opposite sides of a process boundary** in
+     vLLM. Our FT logic therefore splits the same way: admission decision in the
+     `Scheduler`, mask/capture in the `GPUModelRunner`.
+
+2. **Where the backward process attaches is the same in both.** In DeltaServe
+   the backward service is spawned by `model_rpc.py` — the GPU-owning process.
+   In vLLM the GPU-owning process is the `Worker`. So the mental substitution is
+   simply **`model_rpc.py` → `gpu_worker.py`**: that's the process that spawns
+   our backward child and shares the activation buffers with it.
+
+### 3.3 vLLM things that don't exist in DeltaServe (so they may surprise you)
+
+- **No prefill/decode phase split.** DeltaServe explicitly does "one prefill
+  batch, then a run of decode steps." vLLM V1 has **one unified step**: each
+  `schedule()` builds a single token-budget batch that can mix prefilling and
+  decoding requests, and **chunked prefill** splits a long prompt across steps.
+  Our co-serving invariants (FT runs eager, FT is prefill-only) must be
+  expressed in this unified model, not the two-phase one.
+- **Automatic prefix caching.** vLLM hashes KV blocks and reuses them across
+  requests. DeltaServe has nothing like it. Mostly orthogonal to us, but it
+  means KV blocks have a lifecycle (hashing, eviction) we shouldn't fight.
+- **Preemption / recompute.** vLLM can evict a running request and recompute it
+  later under memory pressure. FT "requests" must be designed so they're never
+  left half-scheduled across a preemption (they're single-step prefill anyway).
+- **ZMQ multiprocess frontend↔core.** DeltaServe's API and scheduler are closer
+  together; in vLLM there's a serialization boundary between the HTTP layer and
+  the engine. Our finetuning control surface (start/stop FT, report loss) has to
+  cross it or live entirely engine-side.
+- **`torch.compile` + piecewise cudagraph.** vLLM compiles the model. This is
+  the deep reason FT batches must run **eager**: capturing side-effecting
+  activation copies inside a compiled/graphed region reintroduces the pool
+  aliasing problem (see §2 mismatch #2).
+- **A real executor abstraction (TP/PP, Ray or mp).** DeltaServe wires TP more
+  by hand. vLLM's executor fans a step out to all workers; our backward process
+  story has to be per-worker (per GPU), mirroring how captures are lock-step
+  under TP in DeltaServe.
+
+### 3.4 DeltaServe things that don't exist in vLLM (what we are actually adding)
+
+Everything in this list is net-new code on the fork — vLLM has no hook for it:
+
+- The **backward/SFT process** and its CUDA-graphed backward (`SFT_service*.py`).
+- **Activation + logit/hidden-state capture** for FT tokens during the forward.
+- The **`finetune_mask`** and FT-vs-inference token distinction.
+- **FT sample injection** into the scheduler's batch + the **finetuning store**.
+- The **SLO-aware FT-admission scheduler logic + the cost estimator/tracker**.
+- The **cross-process shared activation buffers** + **pause-event** co-serving
+  contract + the **MPS partition split**.
+
+This is the precise list the phased plan below builds, in order.
+
+## 4. Phased build plan
 
 The phases follow the user's proposed sequence, each ending in an independently
 **testable** state. Do not start a phase until the previous one's test passes.
@@ -301,7 +441,7 @@ Steps:
    slices of the shared buffers) + fp32 LoRA weights + logits/targets — all
    framework-agnostic PyTorch. The main edits are wiring the *inputs* to come
    from the vLLM-side buffers and the FT sample metadata (token counts, target
-   ids) rather than from LightLLM structures.
+   ids) rather than from DeltaServe's existing engine structures.
 2. **fp32 LoRA weights to the backward process.** Hand the FT adapter's weights
    to the backward process as a persistent fp32 copy (analogue of
    `lora_adapter.py:load_gpu_fp32_dict`, `model_rpc.py:179`). Keep the
@@ -371,7 +511,7 @@ Steps:
    `auto_benchmark.py` / `auto_plot.py` style measurement (TTFT CDF, latency over
    time, FT tokens/s, SLO satisfaction rate) adapted to the vLLM server.
 
-Exit criteria: SLO satisfaction comparable to DeltaServe-on-LightLLM at similar
+Exit criteria: SLO satisfaction comparable to the current DeltaServe at similar
 FT throughput, with FT admission demonstrably responsive to inference load.
 
 ### Phase 5 (later) — optimizations & assets
@@ -381,8 +521,9 @@ Pull these in only after Phases 1–4 are solid:
 - Backward CUDA graphs fully tuned (padded attention path, sizing via
   `analyze_finetuning_data.py` / `keep_p95.py`).
 - A dedicated FT **activation pool** if vLLM's allocator gets in the way (the
-  packed-KV / occupancy-tracker work is LightLLM-specific and likely *not*
-  needed — vLLM owns KV; we only manage the separate FT activation buffers).
+  packed-KV / occupancy-tracker work is tied to DeltaServe's own allocators and
+  likely *not* needed — vLLM owns KV; we only manage the separate FT activation
+  buffers).
 - Eval/analysis tooling port (`auto_benchmark`, `auto_plot`, comparison plots).
 - Multi-TP correctness (DeltaServe captures are lock-step under TP; verify the
   backward process story under vLLM's TP worker layout — backward likely lives
@@ -390,16 +531,17 @@ Pull these in only after Phases 1–4 are solid:
 
 ---
 
-## 4. Top risks / things to resolve early
+## 5. Top risks / things to resolve early
 
 1. **Cross-process CUDA tensor sharing under vLLM's `spawn`** — prove in Phase 1.
    If torch CUDA IPC across `spawn` is fragile in the vLLM worker context, the
    fallback is to spawn the backward process via `fork` from the worker
    specifically (the worker already has the CUDA context), or to use explicit
    `cudaIpcGetMemHandle` plumbing. Resolve before anything else.
-2. **Pinning vLLM internals.** The `Scheduler`, `GPUModelRunner`, and model
-   definitions are not stable public APIs. Subclass + monkeypatch narrowly,
-   keep a thin adapter layer, and pin the version hard.
+2. **Editing vLLM internals on the fork.** The `Scheduler`, `GPUModelRunner`,
+   and model definitions are not stable public APIs. Prefer subclassing where
+   the seams allow it and patch source narrowly where they don't; keep our
+   changes localized so rebasing onto a newer upstream tag stays tractable.
 3. **Forward-hook activation capture vs. torch.compile.** vLLM compiles the model
    forward. Forward hooks on submodules may not fire as expected inside a
    compiled/graphed region. Mitigated by the FT-batches-run-eager invariant — but
@@ -413,12 +555,13 @@ Pull these in only after Phases 1–4 are solid:
 
 ---
 
-## 5. One-paragraph summary
+## 6. One-paragraph summary
 
-Re-host DeltaServe's co-serving layer on **vLLM V1** (pinned recent stable tag,
-**Python-only / precompiled build** — nothing we add touches C++/CUDA). vLLM's
-native multi-LoRA replaces DeltaServe's S-LoRA pipeline and its multi-process
-engine replaces LightLLM's router. We **port** the genuinely novel parts:
+Re-host DeltaServe's co-serving layer on **vLLM V1**, developed on **our own
+fork** branched from a recent stable tag, using a **Python-only / precompiled
+build** (nothing we add touches C++/CUDA). vLLM's native multi-LoRA replaces
+DeltaServe's custom multi-LoRA pipeline and its multi-process engine replaces
+DeltaServe's existing router. We **port** the genuinely novel parts:
 the backward SFT process + GPU-buffer sharing + pause contract, the finetuning
 sample store, FT-token injection with a `finetune_mask` and a dedicated FT
 adapter, activation capture into shared buffers, the actual LoRA backward pass,
