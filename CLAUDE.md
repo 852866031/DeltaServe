@@ -628,6 +628,22 @@ Per-script notes:
     instead of `timeline_live.csv`; appends the matching `_<shape>`
     to the suffix. Mutually exclusive.
   - `--timeline-gpu` — override the auto-detected GPU subdir.
+
+  **FT lifecycle under `--co`** (matters for interpreting the bwd log):
+  finetuning is started *before* warmup so the FT loop is live during
+  both the warmup window and the scheduled-timeline window. At the
+  instant the scheduler arms the first timeline request, the script
+  captures a wall-clock anchor `T = datetime.now()`. After
+  `exit_finetuning` flushes the server's `bwd_log<suffix>_<mode>.csv`,
+  `trim_bwd_log_before(path, T)` rewrites that file in place, dropping
+  every row whose ISO-8601-second `timestamp` is strictly before `T`
+  (rows in the same second as `T` are kept — the server records
+  bwd_log timestamps at second precision). The final bwd_log therefore
+  contains only the timeline-phase backward batches, which is what
+  `auto_plot.py` (and the comparison plots under `scripts/`) treat as
+  the FT contribution. If you're inspecting the raw bwd_log yourself,
+  remember the warmup batches have already been stripped — the first
+  row's timestamp ≈ `T`, not server-start time.
 - `scripts/bwd_graph_plot.py` — compares two CSV runs (eager vs.
   graphed) on a 1×3 layout: TTFT CDF, E2E latency over time (with avg
   annotation), cumulative finetuning tokens (with tok/s). Uses
