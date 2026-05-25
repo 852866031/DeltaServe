@@ -1,0 +1,6 @@
+.pytest_cache/
+__pycache__/
+*.pyc
+# Optional upstream sglang checkout at the top of sglang-port/ — don't commit it.
+# Only matches sglang-port/sglang/, NOT the in-package sglang/ namespace under dserve-sglang/.
+/sglang/

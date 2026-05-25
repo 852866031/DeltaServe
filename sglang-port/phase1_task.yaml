@@ -1,0 +1,151 @@
+task: |
+  # DeltaServe → sglang port — Phase 1 (Scaffold + Integration Mapping)
+
+  ## Context
+  DeltaServe-vLLM (https://github.com/852866031/DeltaServe-vLLM) is a vendored
+  fork of vLLM v1 that adds co-serving of inference + LoRA-SFT backward on the
+  same GPU. The full delta is summarized in
+  `/tmp/dsv-recon/DeltaServe-vLLM/VLLM_FORK_CHANGES.md` and the new code lives
+  in `/tmp/dsv-recon/DeltaServe-vLLM/dserve-vllm/vllm/deltaserve/`. Key
+  abstractions: FinetuneCoordinator, FinetuneScheduler (subclass of vLLM
+  Scheduler), BackwardProcess + BackwardService (subprocess + MPS),
+  FinetuneAccumulator (forward hooks copying activations), FinetuneInjector,
+  FinetuningStore.
+
+  Goal of Phase 1: produce an executable port plan, NOT the full port. The
+  full port is multi-week. This phase lays the foundation so subsequent phases
+  can implement layer-by-layer.
+
+  ## Working directory
+  /tmp/pair_sglang_port/
+
+  ## Deliverables (ALL required for approval)
+
+  ### D1. SGlang reconnaissance
+  A file `D1_SGLANG_RECON.md` covering:
+   - Where is sglang's Scheduler? (file + key method names; absolute path under
+     /tmp/pair_sglang_port/sglang/)
+   - Where is sglang's ModelRunner forward path? (file + entry method)
+   - Where is sglang's worker process bootstrap? (file + entry method)
+   - Where is sglang's LoRA serving / adapter manager? (file + key methods)
+   - Does sglang use multi-process workers like vLLM, or single-process?
+   - What's sglang's KV cache abstraction (page-based? token-based?)
+   - How does sglang's batch scheduling work (continuous batching? chunked
+     prefill?)
+
+   Must include file:line references. To get sglang, clone
+   https://github.com/sgl-project/sglang to /tmp/pair_sglang_port/sglang/
+   (shallow clone is fine: --depth 1).
+
+  ### D2. Component-by-component mapping
+  A file `D2_MAPPING.md` with one section per DeltaServe component:
+    - FinetuneCoordinator
+    - FinetuneScheduler
+    - BackwardProcess + BackwardService
+    - FinetuneAccumulator (forward hooks)
+    - FinetuneInjector + FinetuningStore
+    - StepTimeEstimator
+    - FinetuneConfig
+  For EACH:
+   - 1-2 line description of what it does in vLLM
+   - Where in sglang the equivalent hook should live (file + class + method)
+   - Risks specific to sglang's architecture (e.g. "sglang's Scheduler is in
+     a different process — IPC needed")
+
+  ### D3. Phased implementation plan
+  A file `D3_PLAN.md` with a numbered plan, 5-8 phases. For each phase:
+   - 1-line goal
+   - List of files to create/modify (full paths)
+   - Acceptance test (how do we verify this phase works?)
+   - Estimated lines of code
+
+  ### D4. Skeleton directory
+  Create `/tmp/pair_sglang_port/dserve-sglang/` with:
+   - empty package layout mirroring the vLLM port:
+       sglang/deltaserve/__init__.py
+       sglang/deltaserve/coordinator.py    (stub: docstring + class header)
+       sglang/deltaserve/ft_scheduler.py   (stub)
+       sglang/deltaserve/backward_process.py (stub)
+       sglang/deltaserve/bwd_services/__init__.py
+       sglang/deltaserve/bwd_services/base.py (stub)
+       sglang/deltaserve/accumulate.py     (stub)
+       sglang/deltaserve/finetuning_store.py (stub)
+       sglang/deltaserve/ft_injector.py    (stub)
+       sglang/deltaserve/estimator.py      (stub)
+       sglang/config/finetune.py           (stub: FinetuneConfig dataclass copy)
+   - README.md at top of dserve-sglang/ describing the package
+   - Each stub file must compile (importable, but raise NotImplementedError
+     in any methods that aren't implemented)
+
+  ### D5. Smoke verification
+  Worker must run:
+    cd /tmp/pair_sglang_port/dserve-sglang && python -c "import sglang.deltaserve.coordinator; import sglang.deltaserve.ft_scheduler; import sglang.deltaserve.backward_process; print('imports ok')"
+  and report the stdout. (You may need to set PYTHONPATH=.)
+
+  ## What is NOT in this phase
+   - No real backward pass implementation
+   - No real scheduler subclass implementation
+   - No sglang upstream modifications
+  Those come in Phase 2+.
+
+workdir: /tmp/pair_sglang_port
+max_turns: 40
+approver: reviewer
+routing:
+  on_reject_goto: planner
+
+roles:
+  - name: planner
+    tools: false
+    prompt: |
+      You are the PLANNER for porting DeltaServe (vLLM fork) to sglang.
+
+      CRITICAL: Issue ONE concrete next step. Be specific: filename, exact
+      command, content snippet. Do not write the full content of D1/D2/D3/D4
+      in your message — direct the worker to write them.
+
+      Recommended sequence (you may adjust):
+        T1  worker: clone sglang to /tmp/pair_sglang_port/sglang (--depth 1)
+        T2  worker: inspect sglang's repo structure (ls, key files)
+        T3  worker: write D1_SGLANG_RECON.md based on the inspection
+        T4  worker: write D2_MAPPING.md mapping each vLLM component
+        T5  worker: write D3_PLAN.md with phased plan
+        T6  worker: create dserve-sglang/ skeleton directory + stub files
+        T7  worker: run the smoke import test
+        T8  reviewer approves
+
+      Look at history. If the reviewer rejected, focus on the SPECIFIC gap.
+
+  - name: worker
+    tools: true
+    prompt: |
+      You are the WORKER. Execute the planner's instruction using your tools
+      (Bash, Edit, Write, Read, Glob, Grep). Reference recon at
+      /tmp/dsv-recon/DeltaServe-vLLM/ and VLLM_FORK_CHANGES.md when you need
+      vLLM details. Reference sglang at /tmp/pair_sglang_port/sglang/ after
+      cloning. End every turn with a 2-4 sentence summary of WHAT YOU DID and
+      WHAT YOU OBSERVED (cite file:line or paste stdout snippets).
+
+  - name: reviewer
+    tools: true
+    prompt: |
+      You are the REVIEWER and the FINAL approver. Use Read/Bash/Glob to verify
+      the actual filesystem state — do not trust the worker's words alone.
+
+      Required for APPROVE (check every one):
+       [ ] /tmp/pair_sglang_port/sglang/ exists and is a real sglang clone
+       [ ] D1_SGLANG_RECON.md exists, covers all 7 questions, includes file:line
+           refs for sglang Scheduler, ModelRunner, LoRA manager
+       [ ] D2_MAPPING.md exists, has all 7 components, each with sglang
+           target location + risk note
+       [ ] D3_PLAN.md exists, has 5-8 numbered phases with files/tests/LoC
+       [ ] /tmp/pair_sglang_port/dserve-sglang/ exists with at least 10 stub
+           files in the right layout
+       [ ] The smoke import test `python -c "import sglang.deltaserve.*"` works
+           (worker pasted real stdout, or you ran it yourself)
+
+      If ANY checkbox fails, REQUEST_CHANGES with a single concrete next step
+      back to the planner. Be picky about file existence and content depth —
+      a 5-line D2_MAPPING.md is not acceptable; it must cover all 7 components
+      with real sglang file paths.
+      Only say APPROVE when EVERY checkbox is satisfied.
