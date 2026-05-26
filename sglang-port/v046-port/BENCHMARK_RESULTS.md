@@ -110,6 +110,34 @@ Three panels:
 - `plot_co_serving.py` — generates the plot
 - `auto_benchmark_sglang.py` — the benchmark harness (sglang-targeted, vLLM-style)
 
+## Loop iteration 2 — Section 4 SLO admission
+
+Two throttle mechanisms tried at the 50% FT load:
+
+| Variant | FT bwd fires | TTFT mean | Latency mean | Latency p99 |
+|---|---:|---:|---:|---:|
+| co50 no throttle | 35 | 24.2 ms | 825 ms | 938 ms |
+| co50 SLO=2000ms fire-throttle | 13 | 24.6 ms | 839 ms | 963 ms |
+| co50 admit-rate=0.5 | 18 | **23.5 ms** | **791 ms** | 980 ms |
+
+**Finding 1 (negative): SLO fire-throttle barely moves the needle.** Reducing
+backward fires 35→13 (saved 280ms backward compute over 25s timeline) had
+near-zero effect on inference TTFT/latency. The dominant cost isn't the
+backward fire itself — it's the per-prefill **eager-vs-graph** overhead
+that every FT-bearing batch incurs. Backward is ~8ms warm; eager prefill
+overhead is much bigger per call and there are 112 of those at 50% FT.
+
+**Finding 2 (positive): admit-rate throttle reduces effective FT load
+proportionally.** Dropping half the FT tags at request handler time
+(`SGLANG_DS_FT_ADMIT_RATE=0.5`) on a 50% FT workload effectively converts
+it to a 25% FT workload — and the numbers match: TTFT 23.5ms ≈ co25's
+22.7ms, latency 791ms ≈ co25's 801ms.
+
+**Implication for real SLO admission**: the gate should be at the request
+handler (drop FT tag when over budget), not at the backward-fire site.
+The 6-param SLO predictor from the doc maps directly to this — once we
+have measured per-step TTFT, we can dynamically tune the admit-rate.
+
 ## Next loop iteration
 
 1. **Task A: port real GQA backward kernels** (~5 hrs):

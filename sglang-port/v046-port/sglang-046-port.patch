@@ -68,7 +68,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
      input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
  
 --- /tmp/sglang_v046_backup/srt/managers/scheduler.py	2026-05-26 19:10:26.052386525 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 22:33:19.000000000 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 23:09:32.000000000 +0000
 @@ -191,6 +191,22 @@
      ):
          # Parse args
@@ -92,7 +92,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          self.tp_rank = tp_rank
          self.pp_rank = pp_rank
          self.tp_size = server_args.tp_size
-@@ -934,6 +950,15 @@
+@@ -934,6 +950,23 @@
              )
              req.tokenizer = self.tokenizer
  
@@ -103,12 +103,20 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
 +            if getattr(recv_req, "is_finetuning", False):
 +                from sglang.srt.deltaserve.gates import is_finetuning_started
 +                if is_finetuning_started():
-+                    req.is_finetuning = True
++                    # Section 4: admit-rate throttle. SGLANG_DS_FT_ADMIT_RATE
++                    # (0.0-1.0) is the fraction of FT-tagged requests that
++                    # actually carry the FT tag through. 1.0 = all; 0.5 =
++                    # half; 0.0 = none. Lets the operator cap eager-prefill
++                    # load without changing the request stream.
++                    import os, random
++                    rate = float(os.environ.get("SGLANG_DS_FT_ADMIT_RATE", "1.0"))
++                    if rate >= 1.0 or random.random() < rate:
++                        req.is_finetuning = True
 +
              if self.disaggregation_mode != DisaggregationMode.NULL:
                  # Invalid request for disaggregated mode
                  if recv_req.bootstrap_room is None:
-@@ -1550,6 +1575,16 @@
+@@ -1550,6 +1583,16 @@
              logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
              time.sleep(self.forward_sleep_time)
  
@@ -125,7 +133,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          # Run forward
          if self.is_generation:
              if self.spec_algorithm.is_none():
-@@ -1611,6 +1646,12 @@
+@@ -1611,6 +1654,12 @@
              ret = EmbeddingBatchResult(
                  embeddings=embeddings, bid=model_worker_batch.bid
              )

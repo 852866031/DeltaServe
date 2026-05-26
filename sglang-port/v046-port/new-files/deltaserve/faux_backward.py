@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 # DeltaServe FT buffer policy: only fire backward when the running token
 # count reaches the threshold (matches `max_saved_finetuning_tokens=256`).
 _BACKWARD_TOKEN_THRESHOLD = 256
+
+# DeltaServe Section 4: SLO-aware admission throttling. After every faux
+# backward fires, the next fire is gated by a minimum interval. This is a
+# crude proxy for the real 6-param SLO estimator from the doc — it bounds
+# FT throughput to keep inference TTFT/latency under budget. Configurable
+# via SGLANG_DS_BACKWARD_MIN_INTERVAL_MS (default 0 = unthrottled).
+import os as _os
+_BACKWARD_MIN_INTERVAL_S = float(_os.environ.get("SGLANG_DS_BACKWARD_MIN_INTERVAL_MS", "0")) / 1000.0
+_last_backward_fire_t = 0.0
+_backward_skipped_for_slo = 0
+
 _accumulated_tokens = 0
 _backward_calls = 0
 _backward_total_ms = 0.0
@@ -51,6 +62,8 @@ def get_stats() -> Dict[str, float]:
         "backward_calls": _backward_calls,
         "backward_total_ms": _backward_total_ms,
         "pending_tokens": _accumulated_tokens,
+        "skipped_for_slo": _backward_skipped_for_slo,
+        "slo_min_interval_ms": _BACKWARD_MIN_INTERVAL_S * 1000,
     }
 
 
@@ -137,6 +150,8 @@ def _run_full_backward(model: torch.nn.Module) -> float:
                 "backward_calls": _backward_calls,
                 "backward_total_ms": _backward_total_ms,
                 "last_call_ms": elapsed_ms,
+                "skipped_for_slo": _backward_skipped_for_slo,
+                "slo_min_interval_ms": _BACKWARD_MIN_INTERVAL_S * 1000,
             }, f)
     except OSError:
         pass
@@ -160,6 +175,16 @@ def run_faux_backward(snapshot: Dict[str, Any], model: torch.nn.Module) -> Optio
     _accumulated_tokens += n_tokens
 
     if _accumulated_tokens >= _BACKWARD_TOKEN_THRESHOLD:
+        # Section 4: SLO-aware throttling. If the previous backward was too
+        # recent, defer this one — the buffer keeps growing but the inference
+        # path gets its slice of the GPU back.
+        global _last_backward_fire_t, _backward_skipped_for_slo
+        if _BACKWARD_MIN_INTERVAL_S > 0:
+            since = time.monotonic() - _last_backward_fire_t
+            if since < _BACKWARD_MIN_INTERVAL_S:
+                _backward_skipped_for_slo += 1
+                return None  # defer; tokens stay accumulated
         _accumulated_tokens = 0
+        _last_backward_fire_t = time.monotonic()
         return _run_full_backward(model)
     return None

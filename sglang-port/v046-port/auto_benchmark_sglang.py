@@ -271,6 +271,10 @@ def main():
     ap.add_argument("--ft-fraction", type=float, default=0.1,
                     help="Fraction of timeline rows to mark as FT (only meaningful with --co).")
     ap.add_argument("--mps-pct", type=int, default=20)
+    ap.add_argument("--slo-min-interval-ms", type=int, default=0,
+                    help="Section 4 SLO throttle: minimum ms between faux backward fires (0=unthrottled).")
+    ap.add_argument("--ft-admit-rate", type=float, default=1.0,
+                    help="Section 4 admit-rate throttle: fraction of incoming FT-tagged reqs that keep the tag (0.0-1.0).")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -299,6 +303,12 @@ def main():
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
         if args.co:
             env["SGLANG_DS_FT_START_ON_LAUNCH"] = "0"
+            # Section 4: optional SLO throttle (minimum interval between faux fires)
+            if args.slo_min_interval_ms > 0:
+                env["SGLANG_DS_BACKWARD_MIN_INTERVAL_MS"] = str(args.slo_min_interval_ms)
+            # Section 4 (admit-side): fraction of FT-tagged reqs that keep the tag
+            if args.ft_admit_rate < 1.0:
+                env["SGLANG_DS_FT_ADMIT_RATE"] = str(args.ft_admit_rate)
         server_proc = subprocess.Popen(
             cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
             env=env, preexec_fn=os.setsid,
