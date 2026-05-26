@@ -1,0 +1,256 @@
+--- /tmp/sglang_v046_backup/srt/entrypoints/engine.py	2026-05-26 19:10:26.032386465 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/entrypoints/engine.py	2026-05-26 19:20:06.000000000 +0000
+@@ -131,6 +131,20 @@
+         self.tokenizer_manager = tokenizer_manager
+         self.scheduler_info = scheduler_info
+ 
++        # DeltaServe Phase 6: optionally spawn the backward subprocess. MPS env
++        # (CUDA_MPS_ACTIVE_THREAD_PERCENTAGE) is applied to the child only.
++        self.backward_process = None
++        if getattr(server_args, "enable_finetuning", False):
++            from sglang.srt.deltaserve.backward_process import spawn_backward_process
++            from sglang.srt.utils import get_open_port
++            bwd_port = get_open_port()
++            self.backward_channel_addr = f"tcp://127.0.0.1:{bwd_port}"
++            self.backward_process = spawn_backward_process(
++                channel_addr=self.backward_channel_addr,
++                model_name=server_args.model_path,
++                mps_pct=getattr(server_args, "backward_mps_percentage", 10),
++            )
++
+         context = zmq.Context(2)
+         self.send_to_rpc = get_zmq_socket(
+             context, zmq.DEALER, port_args.rpc_ipc_name, True
+@@ -547,6 +561,24 @@
+     server_args.check_server_args()
+     _set_envs_and_config(server_args)
+ 
++    # DeltaServe Phase 6: spawn backward subprocess BEFORE scheduler so the
++    # MPS env is active when the scheduler initializes CUDA context.
++    _deltaserve_backward_process = None
++    if getattr(server_args, "enable_finetuning", False):
++        from sglang.srt.deltaserve.backward_process import spawn_backward_process
++        from sglang.srt.utils import get_open_port
++        _bwd_port = get_open_port()
++        _bwd_channel_addr = f"tcp://127.0.0.1:{_bwd_port}"
++        _deltaserve_backward_process = spawn_backward_process(
++            channel_addr=_bwd_channel_addr,
++            model_name=server_args.model_path,
++            mps_pct=getattr(server_args, "backward_mps_percentage", 10),
++        )
++        logger.info(
++            f"[DeltaServe] backward subprocess spawned: pid={_deltaserve_backward_process.pid}, "
++            f"channel={_bwd_channel_addr}, mps_pct={server_args.backward_mps_percentage}"
++        )
++
+     # Allocate ports for inter-process communications
+     if port_args is None:
+         port_args = PortArgs.init_new(server_args)
+--- /tmp/sglang_v046_backup/srt/managers/io_struct.py	2026-05-26 19:10:26.044386501 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/io_struct.py	2026-05-26 19:12:15.000000000 +0000
+@@ -89,6 +89,8 @@
+     modalities: Optional[List[str]] = None
+     # LoRA related
+     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
++    # DeltaServe: tag this request as a finetuning sample.
++    is_finetuning: bool = False
+ 
+     # Session info for continual prompting
+     session_params: Optional[Union[List[Dict], Dict]] = None
+@@ -445,6 +447,8 @@
+ 
+     # LoRA related
+     lora_path: Optional[str] = None  # None means just use the base model
++    # DeltaServe: finetuning tag propagated from GenerateReqInput.
++    is_finetuning: bool = False
+     # The input embeds
+     input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+ 
+--- /tmp/sglang_v046_backup/srt/managers/scheduler.py	2026-05-26 19:10:26.052386525 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 19:13:10.000000000 +0000
+@@ -191,6 +191,22 @@
+     ):
+         # Parse args
+         self.server_args = server_args
++        # DeltaServe Phase 1/7: key off ServerArgs.enable_finetuning. When True,
++        # build a FinetuneConfig and attach the FinetuneSchedulerMixin via runtime
++        # class swap. Otherwise no behavior change (inference fast path identical).
++        self.finetune_config = None
++        self.finetune_coordinator = None
++        if getattr(server_args, "enable_finetuning", False):
++            from sglang.srt.configs.finetune import FinetuneConfig
++            from sglang.srt.managers.finetune_coordinator import FinetuneCoordinator
++            from sglang.srt.managers.finetune_scheduler_mixin import FinetuneSchedulerMixin
++            self.finetune_config = FinetuneConfig(enable_finetuning=True)
++            self.__class__ = type(
++                "FinetuneScheduler", (FinetuneSchedulerMixin, self.__class__), {}
++            )
++            self.finetune_coordinator = FinetuneCoordinator(
++                self.finetune_config, backward_channel=None
++            )
+         self.tp_rank = tp_rank
+         self.pp_rank = pp_rank
+         self.tp_size = server_args.tp_size
+@@ -934,6 +950,10 @@
+             )
+             req.tokenizer = self.tokenizer
+ 
++            # DeltaServe Phase 3: propagate finetuning tag onto the Req.
++            if getattr(recv_req, "is_finetuning", False):
++                req.is_finetuning = True
++
+             if self.disaggregation_mode != DisaggregationMode.NULL:
+                 # Invalid request for disaggregated mode
+                 if recv_req.bootstrap_room is None:
+--- /tmp/sglang_v046_backup/srt/managers/schedule_batch.py	2026-05-26 19:10:26.060386547 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/schedule_batch.py	2026-05-26 21:43:31.000000000 +0000
+@@ -443,6 +443,9 @@
+     ):
+         # Input and output info
+         self.rid = rid
++        # DeltaServe Phase 3: finetuning tag set by Scheduler when the incoming
++        # TokenizedGenerateReqInput carries is_finetuning=True.
++        self.is_finetuning: bool = False
+         self.origin_input_text = origin_input_text
+         self.origin_input_ids_unpadded = (
+             origin_input_ids_unpadded
+@@ -1662,6 +1665,9 @@
+             encoder_lens_cpu=self.encoder_lens_cpu,
+             encoder_out_cache_loc=self.encoder_out_cache_loc,
+             lora_paths=[req.lora_path for req in self.reqs],
++            is_finetuning_flags=[
++                bool(getattr(req, "is_finetuning", False)) for req in self.reqs
++            ],
+             sampling_info=self.sampling_info,
+             input_embeds=self.input_embeds,
+             spec_algorithm=self.spec_algorithm,
+@@ -1752,6 +1758,10 @@
+     # Sampling info
+     sampling_info: SamplingBatchInfo
+ 
++    # DeltaServe: per-req finetuning flags. ForwardBatch.init_new builds
++    # is_finetuning_mask from this list (None when no FT reqs are present).
++    is_finetuning_flags: Optional[List[bool]] = None
++
+     # The input Embeds
+     input_embeds: Optional[torch.tensor] = None
+ 
+--- /tmp/sglang_v046_backup/srt/managers/tokenizer_manager.py	2026-05-26 19:10:26.076386595 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/tokenizer_manager.py	2026-05-26 19:12:24.000000000 +0000
+@@ -559,6 +559,7 @@
+                 bootstrap_port=obj.bootstrap_port,
+                 bootstrap_room=obj.bootstrap_room,
+                 lora_path=obj.lora_path,
++                is_finetuning=obj.is_finetuning,
+                 input_embeds=input_embeds,
+                 session_params=session_params,
+                 custom_logit_processor=obj.custom_logit_processor,
+--- /tmp/sglang_v046_backup/srt/mem_cache/paged_allocator.py	2026-05-26 19:10:26.084386617 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/mem_cache/paged_allocator.py	2026-05-26 19:16:27.000000000 +0000
+@@ -187,6 +187,18 @@
+         self._kvcache = kvcache
+         self.ret_values = torch.empty((), dtype=torch.int64, device=self.device)
+ 
++        # DeltaServe FinetuningStore hook: predicate used by alloc() to skip
++        # pages reserved for FT samples. Fast path is gated on _has_reserved so
++        # default behavior is byte-identical when unused.
++        self._reserved_pred = lambda i: False
++        self._has_reserved: bool = False
++
++    def set_reserved_predicate(self, pred) -> None:
++        """DeltaServe Phase 5: register a predicate (page_idx) -> bool that
++        marks pages reserved for FT samples; alloc() will skip them."""
++        self._reserved_pred = pred
++        self._has_reserved = True
++
+     def available_size(self):
+         return len(self.free_pages) * self.page_size
+ 
+--- /tmp/sglang_v046_backup/srt/model_executor/forward_batch_info.py	2026-05-26 19:10:26.100386665 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/forward_batch_info.py	2026-05-26 21:47:21.000000000 +0000
+@@ -252,6 +252,10 @@
+     # For Qwen2-VL
+     mrope_positions: torch.Tensor = None
+ 
++    # DeltaServe: per-row bool tensor marking finetuning-tagged samples.
++    # None on inference-only batches (preserves cuda-graph fast path).
++    is_finetuning_mask: Optional[torch.Tensor] = None
++
+     @classmethod
+     def init_new(
+         cls,
+@@ -296,6 +300,15 @@
+             ).to(device, non_blocking=True),
+         )
+ 
++        # DeltaServe: populate is_finetuning_mask iff any req is FT-tagged.
++        # Inference-only batches leave it None so the cuda-graph fast path
++        # in _forward_raw is untouched.
++        _ft_flags = getattr(batch, "is_finetuning_flags", None)
++        if _ft_flags is not None and any(_ft_flags):
++            ret.is_finetuning_mask = torch.tensor(
++                _ft_flags, dtype=torch.bool
++            ).to(device, non_blocking=True)
++
+         # For DP attention
+         if batch.global_num_tokens is not None:
+             ret.global_num_tokens_cpu = batch.global_num_tokens
+--- /tmp/sglang_v046_backup/srt/model_executor/model_runner.py	2026-05-26 19:10:26.112386699 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-26 21:47:28.000000000 +0000
+@@ -1184,10 +1184,16 @@
+         skip_attn_backend_init: bool,
+         pp_proxy_tensors: Optional[PPProxyTensors],
+     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
++        # DeltaServe: FT-tagged batches force eager forward so per-sample
++        # activation hooks can fire. v0.4.6 has no BreakableCudaGraphRunner;
++        # the eager path is the only way to make hooks observable.
++        _ft_mask = getattr(forward_batch, "is_finetuning_mask", None)
++        _has_ft = _ft_mask is not None and bool(_ft_mask.any().item())
+         can_run_cuda_graph = bool(
+             forward_batch.forward_mode.is_cuda_graph()
+             and self.cuda_graph_runner
+             and self.cuda_graph_runner.can_run(forward_batch)
++            and not _has_ft
+         )
+         if can_run_cuda_graph:
+             ret = self.cuda_graph_runner.replay(
+--- /tmp/sglang_v046_backup/srt/server_args.py	2026-05-26 19:10:26.128386745 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/server_args.py	2026-05-26 19:11:57.000000000 +0000
+@@ -220,6 +220,11 @@
+     disaggregation_ib_device: Optional[str] = None
+     pdlb_url: Optional[str] = None
+ 
++    # DeltaServe co-serving (LoRA finetuning interleaved with inference)
++    enable_finetuning: bool = False
++    backward_mps_percentage: int = 10
++    finetune_config: Optional[str] = None
++
+     def __post_init__(self):
+         # Expert parallelism
+         if self.enable_ep_moe:
+@@ -1416,6 +1421,25 @@
+             help="Set multimodal attention backend.",
+         )
+ 
++        # DeltaServe co-serving (inference + LoRA finetuning on the same GPU)
++        parser.add_argument(
++            "--enable-finetuning",
++            action="store_true",
++            help="Enable DeltaServe co-serving (inference + LoRA finetuning).",
++        )
++        parser.add_argument(
++            "--backward-mps-percentage",
++            type=int,
++            default=ServerArgs.backward_mps_percentage,
++            help="CUDA MPS active-thread percentage for the backward (SFT) process.",
++        )
++        parser.add_argument(
++            "--finetune-config",
++            type=str,
++            default=ServerArgs.finetune_config,
++            help="Path to a YAML file with FinetuneConfig overrides.",
++        )
++
+     @classmethod
+     def from_cli_args(cls, args: argparse.Namespace):
+         args.tp_size = args.tensor_parallel_size
