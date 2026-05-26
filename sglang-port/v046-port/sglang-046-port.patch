@@ -46,6 +46,7 @@
      # Allocate ports for inter-process communications
      if port_args is None:
          port_args = PortArgs.init_new(server_args)
+diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or directory
 --- /tmp/sglang_v046_backup/srt/managers/io_struct.py	2026-05-26 19:10:26.044386501 +0000
 +++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/io_struct.py	2026-05-26 19:12:15.000000000 +0000
 @@ -89,6 +89,8 @@
@@ -67,7 +68,7 @@
      input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
  
 --- /tmp/sglang_v046_backup/srt/managers/scheduler.py	2026-05-26 19:10:26.052386525 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 19:13:10.000000000 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 22:33:19.000000000 +0000
 @@ -191,6 +191,22 @@
      ):
          # Parse args
@@ -91,17 +92,52 @@
          self.tp_rank = tp_rank
          self.pp_rank = pp_rank
          self.tp_size = server_args.tp_size
-@@ -934,6 +950,10 @@
+@@ -934,6 +950,15 @@
              )
              req.tokenizer = self.tokenizer
  
-+            # DeltaServe Phase 3: propagate finetuning tag onto the Req.
++            # DeltaServe Phase 3 + Section 11: propagate finetuning tag onto
++            # the Req — but only if FT admission is OPEN (the /start_finetuning
++            # gate). Lets warmup run with zero FT cost even when reqs carry
++            # is_finetuning=True from the harness.
 +            if getattr(recv_req, "is_finetuning", False):
-+                req.is_finetuning = True
++                from sglang.srt.deltaserve.gates import is_finetuning_started
++                if is_finetuning_started():
++                    req.is_finetuning = True
 +
              if self.disaggregation_mode != DisaggregationMode.NULL:
                  # Invalid request for disaggregated mode
                  if recv_req.bootstrap_room is None:
+@@ -1550,6 +1575,16 @@
+             logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
+             time.sleep(self.forward_sleep_time)
+ 
++        # DeltaServe Section 6: revoke GPU grant during prefill (inference
++        # pre-empts the backward at layer boundaries). No-op when FT
++        # disabled. Decode-only steps run with grant held (concurrent OK).
++        _ds_grant = None
++        if getattr(self, "finetune_coordinator", None) is not None:
++            from sglang.srt.deltaserve.gpu_grant import gpu_grant
++            _ds_grant = gpu_grant()
++            if batch.forward_mode.is_extend():
++                _ds_grant.revoke()
++
+         # Run forward
+         if self.is_generation:
+             if self.spec_algorithm.is_none():
+@@ -1611,6 +1646,12 @@
+             ret = EmbeddingBatchResult(
+                 embeddings=embeddings, bid=model_worker_batch.bid
+             )
++
++        # DeltaServe Section 6: hand the GPU grant back to the backward
++        # after the prefill kernels are queued. Decode-only steps already
++        # had it. Fire-and-forget — no sync.
++        if _ds_grant is not None:
++            _ds_grant.grant()
+         return ret
+ 
+     def process_batch_result(
 --- /tmp/sglang_v046_backup/srt/managers/schedule_batch.py	2026-05-26 19:10:26.060386547 +0000
 +++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/schedule_batch.py	2026-05-26 21:43:31.000000000 +0000
 @@ -443,6 +443,9 @@
@@ -167,7 +203,7 @@
          return len(self.free_pages) * self.page_size
  
 --- /tmp/sglang_v046_backup/srt/model_executor/forward_batch_info.py	2026-05-26 19:10:26.100386665 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/forward_batch_info.py	2026-05-26 21:47:21.000000000 +0000
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/forward_batch_info.py	2026-05-26 22:33:24.000000000 +0000
 @@ -252,6 +252,10 @@
      # For Qwen2-VL
      mrope_positions: torch.Tensor = None
@@ -179,25 +215,102 @@
      @classmethod
      def init_new(
          cls,
-@@ -296,6 +300,15 @@
+@@ -296,6 +300,29 @@
              ).to(device, non_blocking=True),
          )
  
 +        # DeltaServe: populate is_finetuning_mask iff any req is FT-tagged.
-+        # Inference-only batches leave it None so the cuda-graph fast path
-+        # in _forward_raw is untouched.
++        # The mask is per-TOKEN (not per-request) so it can index activations
++        # of shape [total_tokens, D] correctly. For decode each req contributes
++        # 1 token; for prefill each req contributes its extend_seq_len.
 +        _ft_flags = getattr(batch, "is_finetuning_flags", None)
 +        if _ft_flags is not None and any(_ft_flags):
++            # Choose per-req token counts: decode → all-1; prefill → extend_seq_lens.
++            if batch.forward_mode.is_decode_or_idle():
++                token_counts = [1] * len(_ft_flags)
++            else:
++                # prefill: extend_seq_lens has the per-req new-token counts.
++                _es = batch.extend_seq_lens
++                if _es is not None:
++                    token_counts = _es.tolist() if hasattr(_es, "tolist") else list(_es)
++                else:
++                    token_counts = [1] * len(_ft_flags)
++            per_token: list = []
++            for flag, n in zip(_ft_flags, token_counts):
++                per_token.extend([bool(flag)] * int(n))
 +            ret.is_finetuning_mask = torch.tensor(
-+                _ft_flags, dtype=torch.bool
++                per_token, dtype=torch.bool
 +            ).to(device, non_blocking=True)
 +
          # For DP attention
          if batch.global_num_tokens is not None:
              ret.global_num_tokens_cpu = batch.global_num_tokens
 --- /tmp/sglang_v046_backup/srt/model_executor/model_runner.py	2026-05-26 19:10:26.112386699 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-26 21:47:28.000000000 +0000
-@@ -1184,10 +1184,16 @@
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-26 22:33:32.000000000 +0000
+@@ -579,6 +579,25 @@
+             f"mem usage={(before_avail_memory - after_avail_memory):.2f} GB."
+         )
+ 
++        # DeltaServe Phase 4 + Section 1: attach FinetuneAccumulator forward
++        # hooks now that the model exists. Hooks fire when a FT-tagged batch
++        # runs (begin_step set externally) and capture per-sample activations
++        # for the backward.
++        if getattr(self.server_args, "enable_finetuning", False):
++            try:
++                from sglang.srt.deltaserve.accumulate import FinetuneAccumulator
++                self.finetune_accumulator = FinetuneAccumulator()
++                self.finetune_accumulator.register_hooks(self.model)
++                n_handles = len(self.finetune_accumulator._handles)
++                logger.info(
++                    f"[DeltaServe] FinetuneAccumulator attached: {n_handles} forward hooks"
++                )
++            except Exception as e:
++                logger.warning(f"[DeltaServe] accumulator attach failed: {e}")
++                self.finetune_accumulator = None
++        else:
++            self.finetune_accumulator = None
++
+         # Handle the case where some ranks do not finish loading.
+         try:
+             dist.monitored_barrier(
+@@ -1165,6 +1184,18 @@
+     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
+         self.forward_pass_id += 1
+ 
++        # DeltaServe Phase 4: arm the accumulator BEFORE the forward when
++        # the batch carries FT samples. Hooks fire inside model.forward and
++        # capture per-sample activations.
++        _ft_mask = getattr(forward_batch, "is_finetuning_mask", None)
++        _has_ft = _ft_mask is not None and bool(_ft_mask.any().item())
++        if _has_ft and getattr(self, "finetune_accumulator", None) is not None:
++            self.finetune_accumulator.begin_step(
++                req_ids=[],  # not needed for the math
++                finetune_mask=_ft_mask,
++                input_ids=forward_batch.input_ids,
++            )
++
+         with get_global_expert_distribution_recorder().with_forward_pass(
+             self.forward_pass_id,
+             forward_batch,
+@@ -1176,6 +1207,17 @@
+         if self.eplb_manager is not None:
+             self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
+ 
++        # DeltaServe Path C: synchronously run faux-backward in-process so
++        # we measure realistic co-serving GPU contention. Real backward
++        # math wiring follows in next loop iteration (Task A).
++        if _has_ft and getattr(self, "finetune_accumulator", None) is not None:
++            try:
++                from sglang.srt.deltaserve.faux_backward import run_faux_backward
++                snapshot = self.finetune_accumulator.pop_step()
++                run_faux_backward(snapshot, self.model)
++            except Exception as e:
++                logger.warning(f"[DeltaServe] faux-backward failed: {e}")
++
+         return output
+ 
+     def _forward_raw(
+@@ -1184,10 +1226,16 @@
          skip_attn_backend_init: bool,
          pp_proxy_tensors: Optional[PPProxyTensors],
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:

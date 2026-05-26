@@ -97,6 +97,24 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int) -> List
     return cmd
 
 
+def start_finetuning_via_gate(port: int) -> None:
+    """POST /start_finetuning to open the gate. Section 11 of the optimization doc."""
+    import urllib.request, urllib.error
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{port}/start_finetuning",
+                method="POST",
+                data=b"",
+            ),
+            timeout=5,
+        ) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError) as e:
+        print(f"[bench] start_finetuning POST failed: {e}", file=sys.stderr)
+        return False
+
+
 def wait_for_health(port: int, timeout_s: float = 180) -> bool:
     import urllib.request, urllib.error
     deadline = time.time() + timeout_s
@@ -277,10 +295,13 @@ def main():
         log_path = OUTPUT_DIR / f"server_{shape}_{'co' if args.co else 'inf'}.log"
         cmd = build_server_cmd(args.model, args.port, args.co, args.mps_pct)
         print(f"[bench] launching: {' '.join(cmd)}")
+        # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+        if args.co:
+            env["SGLANG_DS_FT_START_ON_LAUNCH"] = "0"
         server_proc = subprocess.Popen(
             cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")},
-            preexec_fn=os.setsid,
+            env=env, preexec_fn=os.setsid,
         )
         print(f"[bench] server pid={server_proc.pid} log={log_path}")
         if not wait_for_health(args.port):
@@ -294,8 +315,14 @@ def main():
         print(f"[bench] server healthy")
 
     # Drop a couple of warmup requests so the first timeline row doesn't see cold start.
-    print(f"[bench] warmup...")
+    # Gate is closed during warmup (Section 11): is_finetuning=True gets dropped to inference.
+    print(f"[bench] warmup (gate closed, ft_fraction=0)...")
     asyncio.run(drive(args.port, timeline[:3], ft_fraction=0.0, t_anchor=time.monotonic()))
+
+    # Section 11: open the gate AFTER warmup, before the timeline runs.
+    if args.co:
+        ok = start_finetuning_via_gate(args.port)
+        print(f"[bench] POST /start_finetuning → {'OK' if ok else 'FAILED'}")
 
     print(f"[bench] running timeline...")
     t_anchor = time.monotonic()
