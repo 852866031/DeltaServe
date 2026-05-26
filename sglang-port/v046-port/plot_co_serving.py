@@ -23,9 +23,12 @@ def load(path):
 
 
 runs = {
-    "inf-only":      ("output/timeline_results_tight_inf.csv", "tab:blue"),
-    "co-serve 10%":  ("output/timeline_results_tight_co10.csv", "tab:orange"),
-    "co-serve 25%":  ("output/timeline_results_tight_co25.csv", "tab:red"),
+    "tight inf":     ("output/timeline_results_tight_inf.csv", "tab:blue"),
+    "tight 10%":     ("output/timeline_results_tight_co10.csv", "tab:orange"),
+    "tight 25%":     ("output/timeline_results_tight_co25.csv", "tab:red"),
+    "tight 50%":     ("output/timeline_results_tight_co50.csv", "tab:purple"),
+    "loose inf":     ("output/timeline_results_loose_inf.csv", "tab:cyan"),
+    "loose 10%":     ("output/timeline_results_loose_co10.csv", "tab:olive"),
 }
 data = {label: load(_HERE / path) for label, (path, _) in runs.items()}
 
