@@ -83,10 +83,83 @@ def _get_buf(name: str, shape: tuple, dtype, device) -> torch.Tensor:
     return buf
 
 
+# Section 2: CUDA graph cache. First fire captures the matmul sequence
+# into a CUDA graph; subsequent fires replay (no kernel launch overhead).
+_BWD_GRAPH = None
+_BWD_GRAPH_X = None  # static input buffer (we just zero-fill it; replay only
+                     # needs shapes/addresses stable, not values)
+_USE_BWD_GRAPH = _os.environ.get("SGLANG_DS_BWD_CUDA_GRAPH", "1") != "0"
+
+
+def precapture_graph(model: torch.nn.Module) -> bool:
+    """Capture the faux backward CUDA graph at startup. Returns True on
+    success. Called from model_runner.load_model end so the one-time
+    capture cost doesn't land during a live FT request."""
+    global _BWD_GRAPH, _BWD_GRAPH_X
+    if not _USE_BWD_GRAPH or _BWD_GRAPH is not None:
+        return False
+    try:
+        layers = list(model.model.layers)
+        L = len(layers)
+        q_w = layers[0].self_attn.qkv_proj.weight
+        D = q_w.shape[1]
+        device = q_w.device
+        dtype = q_w.dtype
+    except Exception:
+        return False
+    inter_dim = 4 * D
+    s = _BACKWARD_TOKEN_THRESHOLD
+    r = 16
+
+    try:
+        _BWD_GRAPH_X = _get_buf("x_resid", (s, D), dtype, device)
+        w_down = _get_buf("w_down", (D, inter_dim), dtype, device)
+        w_attn = _get_buf("w_attn", (D, D), dtype, device)
+        w_loraA = _get_buf("loraA", (D, r), dtype, device)
+        w_loraB = _get_buf("loraB", (r, D), dtype, device)
+        # Warmup pass
+        with torch.no_grad():
+            xw = _BWD_GRAPH_X
+            for _ in range(L):
+                g_y = xw @ w_down
+                xw = g_y @ w_down.t()
+                _ = xw @ w_down
+                for _ in range(6):
+                    xw = xw @ w_attn
+                for _ in range(8):
+                    z = xw @ w_loraA
+                    _ = z @ w_loraB
+        torch.cuda.synchronize()
+        # Capture
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            with torch.no_grad():
+                xw = _BWD_GRAPH_X
+                for _ in range(L):
+                    g_y = xw @ w_down
+                    xw = g_y @ w_down.t()
+                    _ = xw @ w_down
+                    for _ in range(6):
+                        xw = xw @ w_attn
+                    for _ in range(8):
+                        z = xw @ w_loraA
+                        _ = z @ w_loraB
+        _BWD_GRAPH = g
+        logger.warning(f"[DeltaServe] backward CUDA graph PRE-CAPTURED at startup (s={s}, D={D}, L={L})")
+        return True
+    except Exception as e:
+        logger.warning(f"[DeltaServe] precapture failed: {e}")
+        return False
+
+
 def _run_full_backward(model: torch.nn.Module) -> float:
     """Run a backward-shaped compute over s_max=256 tokens against full
-    model dims. Heavy enough to be visible in benchmark numbers."""
-    global _backward_calls, _backward_total_ms
+    model dims. Heavy enough to be visible in benchmark numbers.
+
+    Section 2: when SGLANG_DS_BWD_CUDA_GRAPH=1 (default), first call captures
+    a CUDA graph over the matmul sequence; subsequent calls replay it.
+    """
+    global _backward_calls, _backward_total_ms, _BWD_GRAPH, _BWD_GRAPH_X
     grant = gpu_grant()
     try:
         layers = list(model.model.layers)
@@ -100,6 +173,31 @@ def _run_full_backward(model: torch.nn.Module) -> float:
     inter_dim = 4 * D  # SwiGLU intermediate ratio for Llama
     s = _BACKWARD_TOKEN_THRESHOLD
     r = 16
+
+    # Section 2: CUDA graph replay path. Capture once; replay forever.
+    if _USE_BWD_GRAPH and _BWD_GRAPH is not None:
+        t0 = time.monotonic()
+        _BWD_GRAPH.replay()
+        torch.cuda.synchronize()
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        _backward_calls += 1
+        _backward_total_ms += elapsed_ms
+        import os, tempfile, json
+        try:
+            stats_path = os.path.join(tempfile.gettempdir(), "sglang_ds_gates", "faux_stats.json")
+            with open(stats_path, "w") as f:
+                json.dump({
+                    "backward_calls": _backward_calls,
+                    "backward_total_ms": _backward_total_ms,
+                    "last_call_ms": elapsed_ms,
+                    "skipped_for_slo": _backward_skipped_for_slo,
+                    "slo_min_interval_ms": _BACKWARD_MIN_INTERVAL_S * 1000,
+                    "cuda_graph": True,
+                }, f)
+        except OSError:
+            pass
+        logger.warning(f"[DeltaServe] faux backward #{_backward_calls} GRAPH replay: {elapsed_ms:.1f}ms")
+        return elapsed_ms
 
     t0 = time.monotonic()
     with torch.no_grad():
@@ -141,6 +239,55 @@ def _run_full_backward(model: torch.nn.Module) -> float:
     elapsed_ms = (time.monotonic() - t0) * 1000
     _backward_calls += 1
     _backward_total_ms += elapsed_ms
+
+    # Section 2: capture the matmul sequence into a CUDA graph on the first
+    # fire so subsequent fires replay (no kernel launch overhead). The cost
+    # is one warmup pass + one capture pass + one replay = 3× this first
+    # invocation; amortized over hundreds of subsequent fires.
+    if _USE_BWD_GRAPH and _BWD_GRAPH is None:
+        try:
+            # Pre-allocate static IO outside the graph pool.
+            _BWD_GRAPH_X = _get_buf("x_resid", (s, D), dtype, device)
+            # Warmup: one full run to populate the caching allocator.
+            with torch.no_grad():
+                xw = _BWD_GRAPH_X
+                w_down = _get_buf("w_down", (D, inter_dim), dtype, device)
+                w_attn = _get_buf("w_attn", (D, D), dtype, device)
+                w_loraA = _get_buf("loraA", (D, r), dtype, device)
+                w_loraB = _get_buf("loraB", (r, D), dtype, device)
+                for _ in range(L):
+                    g_y = xw @ w_down
+                    xw = g_y @ w_down.t()
+                    _ = xw @ w_down
+                    for _ in range(6):
+                        xw = xw @ w_attn
+                    for _ in range(8):
+                        z = xw @ w_loraA
+                        _ = z @ w_loraB
+            torch.cuda.synchronize()
+            # Capture.
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                with torch.no_grad():
+                    xw = _BWD_GRAPH_X
+                    w_down = _buffers[f"w_down:({D}, {inter_dim}):{dtype}:{device}"]
+                    w_attn = _buffers[f"w_attn:({D}, {D}):{dtype}:{device}"]
+                    w_loraA = _buffers[f"loraA:({D}, {r}):{dtype}:{device}"]
+                    w_loraB = _buffers[f"loraB:({r}, {D}):{dtype}:{device}"]
+                    for _ in range(L):
+                        g_y = xw @ w_down
+                        xw = g_y @ w_down.t()
+                        _ = xw @ w_down
+                        for _ in range(6):
+                            xw = xw @ w_attn
+                        for _ in range(8):
+                            z = xw @ w_loraA
+                            _ = z @ w_loraB
+            _BWD_GRAPH = g
+            logger.warning(f"[DeltaServe] faux backward CUDA graph CAPTURED (next fires will replay)")
+        except Exception as e:
+            logger.warning(f"[DeltaServe] cuda graph capture failed: {e} — falling back to eager")
+
     # Persist stats to a file so the HTTP server (separate process) can read them.
     import os, tempfile, json
     stats_path = os.path.join(tempfile.gettempdir(), "sglang_ds_gates", "faux_stats.json")
@@ -152,11 +299,12 @@ def _run_full_backward(model: torch.nn.Module) -> float:
                 "last_call_ms": elapsed_ms,
                 "skipped_for_slo": _backward_skipped_for_slo,
                 "slo_min_interval_ms": _BACKWARD_MIN_INTERVAL_S * 1000,
+                "cuda_graph": _BWD_GRAPH is not None,
             }, f)
     except OSError:
         pass
     logger.warning(
-        f"[DeltaServe] faux backward #{_backward_calls} fired: {elapsed_ms:.1f}ms"
+        f"[DeltaServe] faux backward #{_backward_calls} fired (eager): {elapsed_ms:.1f}ms"
     )
     return elapsed_ms
 
