@@ -82,7 +82,8 @@ def load_timeline(path: Path) -> List[TimelineRow]:
     return rows
 
 
-def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int) -> List[str]:
+def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
+                     enable_inference_cuda_graph: bool = True) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
@@ -90,8 +91,9 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int) -> List
         "--port", str(port),
         "--tp-size", "1",
         "--mem-fraction-static", "0.5",
-        "--disable-cuda-graph",
     ]
+    if not enable_inference_cuda_graph:
+        cmd += ["--disable-cuda-graph"]
     if co:
         cmd += ["--enable-finetuning", "--backward-mps-percentage", str(mps_pct)]
     return cmd
@@ -275,6 +277,8 @@ def main():
                     help="Section 4 SLO throttle: minimum ms between faux backward fires (0=unthrottled).")
     ap.add_argument("--ft-admit-rate", type=float, default=1.0,
                     help="Section 4 admit-rate throttle: fraction of incoming FT-tagged reqs that keep the tag (0.0-1.0).")
+    ap.add_argument("--disable-inference-cuda-graph", action="store_true",
+                    help="Disable sglang's cuda-graph for inference batches too. By default inference batches DO use cuda graph (FT batches always bypass via _has_ft check in model_runner).")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -297,7 +301,10 @@ def main():
     log_path = None
     if args.launch_server:
         log_path = OUTPUT_DIR / f"server_{shape}_{'co' if args.co else 'inf'}.log"
-        cmd = build_server_cmd(args.model, args.port, args.co, args.mps_pct)
+        cmd = build_server_cmd(
+            args.model, args.port, args.co, args.mps_pct,
+            enable_inference_cuda_graph=not args.disable_inference_cuda_graph,
+        )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
