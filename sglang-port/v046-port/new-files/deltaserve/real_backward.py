@@ -143,7 +143,11 @@ class _RealBackward:
         if final_in is None:
             return 0.0
         n = final_in.shape[0]
-        if n == 0:
+        # Skip decode-step fires that have no shift-by-1 targets (n_valid would
+        # be 0). head_backward needs at least 2 tokens per sample to compute
+        # one CE term. For 1-token decode steps the backward is pure waste —
+        # ~37ms × hundreds of decode steps per FT request adds up.
+        if n < 2:
             return 0.0
 
         # If sample_lens not provided, treat as single sample of length n.
