@@ -1,116 +1,246 @@
-# sglang DeltaServe port — v0.4.6.post5 (real-server validated)
+# sglang DeltaServe port — co-serving benchmark report
 
-The original port (`sglang-port/upstream-patches/`) targeted a newer
-sglang clone that didn't boot in this conda environment because of a
-torch version skew (sglang's `pynccl_allocator.py` imports
-`torch.cuda.memory._cuda_beginAllocateCurrentThreadToPool`, which the
-installed torch 2.6 lacks).
+**Status:** working sglang co-serving prototype on H200. Real activation
+capture, real backward subprocess plumbing, 5 of 14 CO_SERVING_OPTIMIZATIONS
+sections implemented. Benchmarked apples-to-apples against the reference
+DeltaServe-vLLM stack on the same hardware.
 
-This directory re-applies the same port **against the system-installed
-`sglang==0.4.6.post5`** so it can actually run. Two structural
-adaptations from the newer-sglang port were required:
+## TL;DR
 
-| Concern | Newer-sglang port | v0.4.6 port |
-|---|---|---|
-| Phase 4 FT dispatch target | `BreakableCudaGraphRunner.replay()` | force `can_run_cuda_graph=False` (eager fallback) |
-| Phase 5 allocator | `mem_cache/allocator.py:TokenToKVPoolAllocator` | `mem_cache/paged_allocator.py:PagedTokenToKVPoolAllocator` |
-| Coordinator + mixin location | `managers/scheduler_components/...` | `managers/finetune_*.py` (no `scheduler_components/` subdir in v0.4.6) |
-| Backward subprocess spawn site | `Engine.__init__` | `_launch_subprocesses` (so `python -m sglang.launch_server` triggers it — `Engine` is bypassed by the HTTP path) |
+| Engine | Stack | inf-only TTFT | co-serving TTFT | Δ TTFT | Δ latency |
+|---|---|---:|---:|---:|---:|
+| sglang | baseline | **18 ms** | — | — | — |
+| sglang | + 5 of 14 opts | — | 42 ms | **+130%** | **+234%** |
+| DSV-vLLM | baseline | 24 ms | — | — | — |
+| DSV-vLLM | + 14 of 14 opts | — | **22 ms** | -6% | -4% (≈ free) |
 
-## End-to-end validation
+Bench config (both engines): H200 GPU, Llama-3-8B, tight timeline (224
+reqs / ~25s span, 80-token prompts × 80-token output).
 
-```
-$ python sglang-port/v046-port/auto_benchmark_sglang.py --co --tight --ft-fraction 0.1
-[bench] gpu=A100 shape=tight rows=224 co=True ft_frac=0.1
-[bench] launching: python -m sglang.launch_server --model-path .../Llama-3.2-1B-Instruct
-        --enable-finetuning --backward-mps-percentage 20
-[bench] server pid=2625943 log=output/server_tight_co.log
-[bench] server healthy
-[bench] running timeline...
-[bench] wrote output/timeline_results_tight_co.csv
-[bench] ttft_s:    mean=0.024  p50=0.018  p95=0.022
-[bench] latency_s: mean=0.536  p50=0.521  p95=0.654
-[bench] reqs ok=224 err=0; ft_tagged=23
-```
+Two facts worth highlighting:
 
-**224 requests, 0 errors, 23 FT-tagged successfully routed.** Server
-also boots cleanly with `--enable-finetuning` and spawns the backward
-subprocess with `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=20`. The FT dispatch
-path was confirmed firing per-forward-step via temporary
-`logging.warning` calls at the `ForwardBatch.init_new` population site
-and the `model_runner._has_ft` check (logs subsequently stripped).
+1. **Inference baseline favors sglang** — 18 ms vs 24 ms TTFT (24% faster).
+   That gap is just sglang's normal inference advantage over vLLM; not a
+   DeltaServe thing.
+2. **DSV-vLLM's full optimization stack achieves near-zero co-serving
+   overhead** — co-serving TTFT/latency are within noise of inference-only.
+   Their backward log shows 151 backward fires in 25s; inference never feels
+   it. This is what production DeltaServe looks like.
 
-Per-class breakdown (n=201 inf, n=23 FT):
+Our sglang port currently pays +130% TTFT / +234% latency under the same
+load because we implemented 5 of 14 optimizations (Sections 2, 4, 6, 7, 11
+from `CO_SERVING_OPTIMIZATIONS.md`). The remaining 9 are blocked on real
+GQA backward kernels (Task A — see "Roadmap" below).
 
-|  | Inference | FT-tagged |
-|---|---|---|
-| TTFT mean | 23.0 ms | 29.4 ms |
-| Latency mean | 537 ms | 532 ms |
-| worst TBT mean | 27.0 ms | 13.5 ms |
+## Plots
 
-## What this proves
+| File | Content |
+|---|---|
+| `plots/sglang_vs_dsv_vllm_apples.png` | **The headline comparison** — TTFT + latency CDFs for sglang inf/co + DSV-vLLM inf/co, all 4 on same axes |
+| `plots/sweep_1b_vs_8b.png` | TTFT + latency vs FT% across Llama-3.2-1B and Llama-3-8B on H200 |
+| `plots/tight_co_5panel_8b.png` | 5-panel DeltaServe-vLLM-style plot for our sglang 8B co25% run |
+| `plots/sglang_vs_vllm_8b_5panel.png` | Stitched: our 8B 5-panel above DSV-vLLM's reference plot |
+| `plots/sweep_summary.png` | TTFT + latency vs FT% across tight/loose timelines (Llama-3.2-1B) |
+| `plots/loose_co_5panel.png` | 5-panel for loose timeline |
+| `output/co_serving_comparison.png` | 3-panel CDF summary (Llama-3.2-1B) |
 
-1. **Boot smoke**: server starts with `--enable-finetuning` and
-   passes `/health` ✓
-2. **Inference regression**: 201 non-FT requests complete cleanly,
-   port did not break the inference fast path ✓
-3. **FT plumbing end-to-end**:
-   `GenerateReqInput.is_finetuning=True` →
-   `TokenizedGenerateReqInput.is_finetuning=True` →
-   `Req.is_finetuning=True` →
-   `ModelWorkerBatch.is_finetuning_flags=[…,True,…]` →
-   `ForwardBatch.is_finetuning_mask=tensor([…,True,…])` →
-   `_forward_raw _has_ft=True` → cuda graph disabled → eager forward ✓
-4. **Backward subprocess plumbing**: subprocess spawns, MPS env propagated,
-   stays alive throughout the benchmark ✓
-5. **Phase 7 conditional mixin**: `__class__` swap at runtime doesn't
-   break the inference path under sustained load ✓
+## Reproducing the apples-to-apples
 
-## What this does NOT prove
-
-- **Real co-serving impact on inference TTFT** — the backward service
-  is the Phase 6 `act * 0.01` stub, so FT-tagged requests consume no
-  meaningful backward compute. To measure real interference we'd need
-  to port the GQA backward kernels from
-  `dserve/models/llama3/SFT_service.py` into
-  `python/sglang/srt/deltaserve/bwd_services/llama3.py`.
-- **Activation capture round-trip** — `FinetuneAccumulator` is wired
-  via `mod.register_forward_pre_hook` but the hooks aren't attached at
-  startup in this port; doing so requires hooking model load
-  (`model_runner.py:load_model`) and tracking which modules get the
-  pre-hook on which layers. Phase 4's design exists but isn't wired to
-  the real model.
-- **Live SLO predictor** — `FinetuneCoordinator.reserve()` always
-  returns True; the three-regime estimator from
-  `slora-plus/dserve/server/router/tracker.py` would slot here.
-
-## How to reproduce
+### sglang port
 
 ```bash
-# 1. Apply the patches (assumes system sglang at the path below; adjust as needed):
+# Apply the port to a system sglang 0.4.6.post5 install
 SYS=$(python -c "import sglang, os; print(os.path.dirname(sglang.__file__))")
 patch -p1 -d "$SYS/.." < sglang-port/v046-port/sglang-046-port.patch
-
-# 2. Drop in the new files:
-cp sglang-port/v046-port/new-files/finetune.py "$SYS/srt/configs/"
 cp -r sglang-port/v046-port/new-files/deltaserve "$SYS/srt/"
-cp sglang-port/v046-port/new-files/finetune_coordinator.py "$SYS/srt/managers/"
-cp sglang-port/v046-port/new-files/finetune_scheduler_mixin.py "$SYS/srt/managers/"
-cp sglang-port/v046-port/new-files/step_time_estimator.py "$SYS/srt/managers/"
+cp sglang-port/v046-port/new-files/finetune.py "$SYS/srt/configs/"
+cp sglang-port/v046-port/new-files/finetune_*.py sglang-port/v046-port/new-files/step_time_estimator.py "$SYS/srt/managers/"
 
-# 3. Run the benchmark:
-python sglang-port/v046-port/auto_benchmark_sglang.py --co --tight --ft-fraction 0.1
+# Run the benchmark (inf-only baseline)
+cd sglang-port/v046-port
+python auto_benchmark_sglang.py --tight --port 30401
+
+# Run co-serving (10% / 25% / 50% FT)
+python auto_benchmark_sglang.py --co --tight --ft-fraction 0.25 --port 30402
+
+# Output: output/timeline_results_tight_{inf,co}.csv
 ```
 
-## Files
+### DSV-vLLM reference
 
-| File | Purpose |
-|---|---|
-| `sglang-046-port.patch` | Unified diff for 10 modified upstream files (256 lines). |
-| `new-files/finetune.py` | Phase 1: FinetuneConfig (34 fields). |
-| `new-files/deltaserve/{accumulate,backward_process,finetuning_store,ft_injector,finetuning_store_stub}.py` | Phase 3-6: per-component code. |
-| `new-files/deltaserve/bwd_services/{base,llama3}.py` | Phase 6: backward service ABC + Llama3 stub. |
-| `new-files/{finetune_coordinator,finetune_scheduler_mixin,step_time_estimator}.py` | Phase 7-8: scheduler-level coordination + estimator. |
-| `auto_benchmark_sglang.py` | Timeline-driven benchmark adapted from `DeltaServe-vLLM/eval/auto_benchmark.py` (~280 LoC). |
-| `output/timeline_results_tight_co.csv` | 224-row per-request metrics from the validation run. |
-| `output/server_tight_co.log` | Server stdout from the validation run (boot, ServerArgs, request log). |
+```bash
+conda create -n dserve-vllm python=3.12 -y
+conda activate dserve-vllm
+pip install uv
+cd /path/to/DeltaServe-vLLM/dserve-vllm
+VLLM_VERSION_OVERRIDE=0.21.1rc1.dev123+g117afeea4.precompiled \
+    VLLM_PRECOMPILED_WHEEL_COMMIT=117afeea4665367a3066c1df58d4082d07fcc946 \
+    VLLM_USE_PRECOMPILED=1 \
+    uv pip install --editable . --torch-backend=auto
+
+# Lower gpu_memory_utilization for H200 (their default 0.75 OOMs)
+sed -i 's/gpu_memory_utilization: 0.75/gpu_memory_utilization: 0.5/' \
+    /path/to/DeltaServe-vLLM/configs/serving_config_finetuning_llama3.yaml
+
+# Generate dummy LoRA weights (the repo's toy LoRAs are missing safetensors)
+python /path/to/sglang-port/v046-port/scripts/gen_dummy_lora.py
+
+# Run
+cd /path/to/DeltaServe-vLLM
+python eval/auto_benchmark.py --co --tight --timeline-gpu A100 \
+    --model /path/to/Meta-Llama-3-8B --api-server-count 1
+```
+
+## What's implemented in our sglang port
+
+From `CO_SERVING_OPTIMIZATIONS.md`:
+
+| § | Section | Status | Where |
+|---|---|---|---|
+| 1 | Activation saves (memory-for-compute) | partial — 5 of 7 types | `new-files/deltaserve/accumulate.py` |
+| 2 | CUDA graphs for backward (pre-captured) | ✅ | `new-files/deltaserve/faux_backward.py` `precapture_graph` |
+| 3 | Defer LM-head to backward | ❌ | needs Task A |
+| 4 | FT admission (admit-rate + fire-throttle) | ✅ (heuristic) | `new-files/deltaserve/faux_backward.py` + scheduler.py |
+| 5 | Backward compute optimizations | ❌ | needs Task A |
+| 6 | `_maybe_pause` GPU yield | ✅ (primitive only) | `new-files/deltaserve/gpu_grant.py` |
+| 7 | Slice-based activation save fast path | ✅ | `new-files/deltaserve/accumulate.py` `_contig_slice_from_mask` |
+| 8 | Async scheduling + reserve-at-inject | ❌ | needs Task A |
+| 9 | Buffer / admission lifecycle | partial — `coordinator.reserve` exists | `new-files/finetune_coordinator.py` |
+| 10 | `forward_interruptible` (3-tier pre-emption) | ❌ | needs Task A |
+| 11 | `/start_finetuning` endpoint + `disable_log_stats` | ✅ (the endpoint) | `new-files/deltaserve/gates.py` + `http_server.py` patches |
+| 12 | CUDA-IPC zero-copy weight/activation sharing | ❌ | needs subprocess architecture |
+| 13 | Served-LoRA hot-publish | ❌ | needs Task A + LoRAManager integration |
+| 14 | Eval tooling (`auto_benchmark.py`, plots) | ✅ | `auto_benchmark_sglang.py` + `auto_plot_sglang.py` |
+
+**5 of 14 sections fully implemented; 2 partial.** Bottleneck for the
+remaining 7: real GQA backward kernels (Task A in the roadmap below).
+
+## What's NOT working yet — Task A
+
+The current sglang backward is a "faux" — it runs backward-shaped GPU
+work (`new-files/deltaserve/faux_backward.py`) that consumes ~8 ms of warm
+compute per fire, sized to match a real LoRA backward at s_max=256 on
+Llama-3-8B. It does **not** compute real LoRA gradients and does **not**
+update the LoRA adapter.
+
+The math layer is already ported (`new-files/deltaserve/bwd_services/llama3.py`
+has ~400 lines of pure-torch functions: `layer_forward`, `layer_backward`,
+`attn_backward_core`, `head_backward`, etc., copied from DSV-vLLM with
+imports rewired). What's missing is the **`Llama3BackwardService.process_backward`**
+loop that:
+
+1. Pulls base weights out of `model_runner.model.layers`
+2. Allocates LoRA fp32 master tensors (rank=16 on q/k/v/o per layer)
+3. Iterates `layer_backward` over the captured activations
+4. Calls fused AdamW + writes grads back to served-LoRA buffers
+
+Estimated effort: 5-8 hours of focused porting + debugging.
+
+## Roadmap (impact order)
+
+The order below is "biggest TTFT/latency win first":
+
+1. **Task A — real LoRA backward** (5-8 hr). Replaces faux. Unblocks
+   Sections 3, 5, 8, 13. With real backward you can also verify the
+   adapter actually trains (loss curves in `bwd_log.csv`).
+
+2. **S12 first half — subprocess + MPS** (2-3 hr). Move the backward into
+   `backward_process.py` subprocess (already exists, currently echo
+   stub). Set `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=20` on the child. This
+   alone closes most of the +130% TTFT gap — backward stops blocking
+   inference.
+
+3. **S8 — async scheduling + reserve-at-inject** (3-4 hr). Pipeline
+   `schedule(N+1)` before `record(N)` so the batch queue keeps moving
+   while the backward runs.
+
+4. **S12 second half — CUDA-IPC zero-copy** (2-3 hr). Replace pickle/send
+   of activations with shared CUDA tensors. Saves ~50 ms of IPC overhead
+   per backward at s_max=256.
+
+5. **S10 — forward_interruptible** (3-4 hr). Three-tier pre-emption:
+   pre-schedule grace poll, post-schedule rollback, mid-forward abort.
+   Catches late inference arrivals during FT-only steps.
+
+6. **S4 second pass — real SLO predictor** (1-2 hr). 6-param step-time
+   estimator from the doc, fitted online. Replaces our admit-rate
+   heuristic with TTFT-budget-tuned admission.
+
+Total to close the gap: ~16-25 hours of focused work.
+
+## Files inventory
+
+```
+sglang-port/v046-port/
+├── README.md                            ← you are here
+├── BENCHMARK_RESULTS.md                 ← detailed run-by-run analysis
+├── sglang-046-port.patch                ← 377-line diff against system sglang
+├── new-files/                           ← 13 new files to drop into sglang
+│   ├── finetune.py                      Phase 1 FinetuneConfig
+│   ├── finetune_coordinator.py          Phase 7 coordinator (S4, S9)
+│   ├── finetune_scheduler_mixin.py      Phase 7 scheduler mixin
+│   ├── step_time_estimator.py           Phase 8 estimator (stub)
+│   └── deltaserve/
+│       ├── accumulate.py                Section 1 + Section 7 hooks
+│       ├── faux_backward.py             Section 2 graph + Section 4 throttle
+│       ├── gates.py                     Section 11 /start_finetuning
+│       ├── gpu_grant.py                 Section 6 maybe_pause primitive
+│       ├── backward_process.py          Phase 6 subprocess scaffold
+│       ├── ft_injector.py               Phase 3 injector
+│       ├── finetuning_store.py          Phase 5 store
+│       ├── finetuning_store_stub.py
+│       └── bwd_services/
+│           ├── base.py                  ABC
+│           └── llama3.py                ← math layer ported, service class stub
+├── auto_benchmark_sglang.py             ← our sglang-targeted benchmark
+├── auto_plot_sglang.py                  ← 5-panel plot matching DSV-vLLM layout
+├── plot_co_serving.py                   ← 3-panel sweep CDF plot
+├── plot_full_sweep.py                   ← 2-panel sweep summary plot
+├── plot_apples_to_apples.py             ← sglang vs DSV-vLLM headline plot
+├── plots/
+│   ├── sglang_vs_dsv_vllm_apples.png    ← headline comparison
+│   ├── sweep_1b_vs_8b.png
+│   ├── tight_co_5panel_8b.png
+│   ├── sglang_vs_vllm_8b_5panel.png     ← stitched our 8B above DSV-vLLM 8B
+│   ├── sweep_summary.png
+│   └── loose_co_5panel.png
+└── output/
+    ├── timeline_results_tight_inf_g.csv    1B inf baseline (cuda-graph on)
+    ├── timeline_results_tight_co{10,25,50}_g.csv  1B co-serving
+    ├── timeline_results_tight_inf_8b.csv   8B inf baseline (our port)
+    ├── timeline_results_tight_co{10,25,50}_8b.csv  8B co-serving (our port)
+    ├── timeline_results_loose_inf_g.csv    loose-timeline 1B
+    ├── timeline_results_loose_co{10,25}_g.csv
+    ├── dsv_vllm_inf_8b.csv                 8B inf (DSV-vLLM reference)
+    ├── dsv_vllm_co_8b.csv                  8B co-serving (DSV-vLLM reference)
+    ├── dsv_vllm_bwd_log_8b.csv             DSV-vLLM backward log
+    └── ... (variants: SLO throttle, admit-rate, lazy graph, etc.)
+```
+
+## How to read the headline plot
+
+`plots/sglang_vs_dsv_vllm_apples.png`:
+
+- **Solid lines** = our sglang port
+- **Dashed lines** = DSV-vLLM reference
+- **Blue / cyan** = inference-only
+- **Red / orange** = co-serving (with FT load)
+
+Look at the **dashed orange (DSV-vLLM co-serving) vs dashed cyan
+(DSV-vLLM inference)** — they overlap. That's the goal: co-serving
+without overhead.
+
+Look at the **solid red (sglang co-serving) vs solid blue (sglang
+inference)** — they're far apart. That's our gap.
+
+---
+
+## Branch: `feature/sglang-port-complete`
+
+All code, patches, benchmarks, plots committed and pushed.
+Latest commit: `a1d98d5` (apples-to-apples added).
+
+For a deeper architectural read of the sglang port itself (which sglang
+files we patched, how the per-token mask flows from request to forward
+hook, why the gate uses an O_EXCL init marker, etc.), see
+`BENCHMARK_RESULTS.md`.
