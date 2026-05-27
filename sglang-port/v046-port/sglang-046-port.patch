@@ -254,8 +254,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          if batch.global_num_tokens is not None:
              ret.global_num_tokens_cpu = batch.global_num_tokens
 --- /tmp/sglang_v046_backup/srt/model_executor/model_runner.py	2026-05-26 19:10:26.112386699 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-26 23:16:25.000000000 +0000
-@@ -579,6 +579,34 @@
++++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-27 09:52:33.000000000 +0000
+@@ -579,6 +579,41 @@
              f"mem usage={(before_avail_memory - after_avail_memory):.2f} GB."
          )
  
@@ -281,6 +281,13 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
 +                    precapture_graph(self.model)
 +                except Exception as e:
 +                    logger.warning(f"[DeltaServe] bwd graph pre-capture skipped: {e}")
++                # Task A: build real backward state if SGLANG_DS_REAL_BACKWARD=1
++                try:
++                    from sglang.srt.deltaserve.real_backward import is_enabled, build_real_backward
++                    if is_enabled():
++                        build_real_backward(self.model)
++                except Exception as e:
++                    logger.warning(f"[DeltaServe] real backward build failed: {e}")
 +            except Exception as e:
 +                logger.warning(f"[DeltaServe] accumulator attach failed: {e}")
 +                self.finetune_accumulator = None
@@ -290,7 +297,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          # Handle the case where some ranks do not finish loading.
          try:
              dist.monitored_barrier(
-@@ -1165,6 +1193,18 @@
+@@ -1165,6 +1200,18 @@
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
          self.forward_pass_id += 1
  
@@ -309,7 +316,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          with get_global_expert_distribution_recorder().with_forward_pass(
              self.forward_pass_id,
              forward_batch,
-@@ -1176,6 +1216,17 @@
+@@ -1176,6 +1223,17 @@
          if self.eplb_manager is not None:
              self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
  
@@ -327,7 +334,7 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          return output
  
      def _forward_raw(
-@@ -1184,10 +1235,16 @@
+@@ -1184,10 +1242,16 @@
          skip_attn_backend_init: bool,
          pp_proxy_tensors: Optional[PPProxyTensors],
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:

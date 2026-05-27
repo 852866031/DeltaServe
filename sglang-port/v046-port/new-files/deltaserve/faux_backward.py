@@ -56,6 +56,26 @@ _backward_total_ms = 0.0
 _buffers: Dict[str, torch.Tensor] = {}
 
 
+def _persist_stats(elapsed_ms: float, cuda_graph: bool = False, real: bool = False) -> None:
+    """Write stats JSON to the gates dir so the http_server (separate proc)
+    can read /finetune_stats."""
+    import os, tempfile, json
+    stats_path = os.path.join(tempfile.gettempdir(), "sglang_ds_gates", "faux_stats.json")
+    try:
+        with open(stats_path, "w") as f:
+            json.dump({
+                "backward_calls": _backward_calls,
+                "backward_total_ms": _backward_total_ms,
+                "last_call_ms": elapsed_ms,
+                "skipped_for_slo": _backward_skipped_for_slo,
+                "slo_min_interval_ms": _BACKWARD_MIN_INTERVAL_S * 1000,
+                "cuda_graph": cuda_graph,
+                "real": real,
+            }, f)
+    except OSError:
+        pass
+
+
 def get_stats() -> Dict[str, float]:
     """Telemetry: how many backwards fired + total wall time."""
     return {
@@ -311,11 +331,35 @@ def _run_full_backward(model: torch.nn.Module) -> float:
 
 def run_faux_backward(snapshot: Dict[str, Any], model: torch.nn.Module) -> Optional[float]:
     """Accumulate captured FT tokens; fire backward when threshold reached.
-    Returns the elapsed ms when a backward fires, None otherwise."""
+    Returns the elapsed ms when a backward fires, None otherwise.
+
+    Task A: when SGLANG_DS_REAL_BACKWARD=1, dispatch to real_backward instead
+    of the synthetic matmul loop. Same buffering + same threshold."""
     global _accumulated_tokens
     layer_in = snapshot.get("layer_in") or {}
     if not layer_in:
         return None
+
+    # Task A dispatch — replace faux with real LoRA backward when configured.
+    try:
+        from sglang.srt.deltaserve.real_backward import is_enabled, get_real_backward
+        if is_enabled():
+            rb = get_real_backward()
+            if rb is not None:
+                # Real backward uses real activations; threshold buffering is moot
+                # because every fire is real (no need to amortize over 256 tokens
+                # of synthetic work).
+                t = rb.process(snapshot, sample_lens=[])
+                if t > 0:
+                    elapsed_ms = t * 1000
+                    global _backward_calls, _backward_total_ms
+                    _backward_calls += 1
+                    _backward_total_ms += elapsed_ms
+                    _persist_stats(elapsed_ms, cuda_graph=False, real=True)
+                    return elapsed_ms
+            return None
+    except Exception as e:
+        logger.warning(f"[DeltaServe] real_backward dispatch failed: {e} — falling back to faux")
 
     # Each layer_in entry has shape [n_ft_tokens, D]. They should all have
     # the same n; take it from the first entry.
