@@ -279,6 +279,8 @@ def main():
                     help="Section 4 admit-rate throttle: fraction of incoming FT-tagged reqs that keep the tag (0.0-1.0).")
     ap.add_argument("--disable-inference-cuda-graph", action="store_true",
                     help="Disable sglang's cuda-graph for inference batches too. By default inference batches DO use cuda graph (FT batches always bypass via _has_ft check in model_runner).")
+    ap.add_argument("--real-backward", action="store_true",
+                    help="Task A: use real LoRA backward kernels (vs faux). Slower per fire but produces real grads + loss curves.")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -316,6 +318,9 @@ def main():
             # Section 4 (admit-side): fraction of FT-tagged reqs that keep the tag
             if args.ft_admit_rate < 1.0:
                 env["SGLANG_DS_FT_ADMIT_RATE"] = str(args.ft_admit_rate)
+            # Task A: real LoRA backward (instead of faux)
+            if args.real_backward:
+                env["SGLANG_DS_REAL_BACKWARD"] = "1"
         server_proc = subprocess.Popen(
             cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
             env=env, preexec_fn=os.setsid,
