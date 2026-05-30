@@ -20,6 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH="$HERE/sglang-046-port.patch"
 SGLANG_VERSION="0.4.6.post5"
+VENDOR_WHEEL="$HERE/vendor/sglang-${SGLANG_VERSION}-py3-none-any.whl"
 
 log() { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[install] ERROR:\033[0m %s\n' "$*" >&2; }
@@ -68,8 +69,14 @@ if python -c "import sglang" 2>/dev/null; then
     exit 1
   fi
   log "sglang $SGLANG_VERSION already installed"
+elif [[ -f "$VENDOR_WHEEL" ]]; then
+  # Install the wheel vendored in this repo so the exact pinned version is
+  # used regardless of PyPI availability. pip still resolves the heavy GPU
+  # deps (torch/flashinfer) from PyPI — those are not vendorable.
+  log "installing vendored wheel $VENDOR_WHEEL (pulls torch/flashinfer; takes a while)"
+  pip install "${VENDOR_WHEEL}[all]"
 else
-  log "installing sglang==$SGLANG_VERSION (this pulls torch/flashinfer; takes a while)"
+  log "vendored wheel not found; falling back to PyPI sglang==$SGLANG_VERSION"
   pip install "sglang[all]==$SGLANG_VERSION"
 fi
 

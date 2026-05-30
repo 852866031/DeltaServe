@@ -11,9 +11,12 @@ This port is **not a fork of sglang**. It is a thin overlay on the stock
   `/start_finetuning` HTTP endpoints, two new server flags). Captured in
   `sglang-046-port.patch`.
 
-That is why the repo "doesn't contain sglang": we ship the delta, not the
-whole engine. Run the installer below against a stock install and you get the
-co-serving build.
+**sglang itself ships in the repo** as a vendored wheel at
+`vendor/sglang-0.4.6.post5-py3-none-any.whl` (pinned, so the build is
+reproducible even if PyPI yanks that version). The only thing the installer
+pulls from the network is the heavy GPU stack (torch / flashinfer), which is
+arch-specific and not vendorable. So one script — `install.sh` — sets up
+everything: vendored sglang + deps + the DeltaServe overlay.
 
 ---
 
@@ -26,9 +29,11 @@ bash install.sh
 
 The script will:
 
-1. `pip install sglang[all]==0.4.6.post5` if sglang isn't already present
-   (pulls torch + flashinfer — several minutes, needs CUDA). If a *different*
-   sglang version is installed it stops and asks you to pin the version first.
+1. Install the **vendored** `vendor/sglang-0.4.6.post5-*.whl` if sglang isn't
+   already present (pip still pulls torch + flashinfer — several minutes, needs
+   CUDA). Falls back to PyPI only if the vendored wheel is missing. If a
+   *different* sglang version is already installed it stops and asks you to pin
+   the version first.
 2. Copy the 21 drop-in files into the installed package.
 3. Apply `sglang-046-port.patch` (`-p1` from the package root), backing up each
    original to `<file>.ds_orig` first.
@@ -66,7 +71,7 @@ bash install.sh --uninstall   # restores *.ds_orig, removes drop-ins (leaves sgl
 ## Manual install (if you don't want the script)
 
 ```bash
-pip install "sglang[all]==0.4.6.post5"
+pip install "vendor/sglang-0.4.6.post5-py3-none-any.whl[all]"   # or: sglang[all]==0.4.6.post5
 SG=$(python -c 'import os,sglang;print(os.path.dirname(sglang.__file__))')
 
 # 1. drop-in package
