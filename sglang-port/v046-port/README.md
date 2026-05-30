@@ -5,6 +5,11 @@ capture, real backward subprocess plumbing, 5 of 14 CO_SERVING_OPTIMIZATIONS
 sections implemented. Benchmarked apples-to-apples against the reference
 DeltaServe-vLLM stack on the same hardware.
 
+> **Installing the port?** See [INSTALL.md](INSTALL.md). The repo ships the
+> delta over stock `sglang==0.4.6.post5` (21 drop-in files +
+> `sglang-046-port.patch`), not a full sglang fork — `bash install.sh` applies
+> it to a stock install.
+
 ## TL;DR
 
 | Engine | Stack | inf-only TTFT | co-serving TTFT | Δ TTFT | Δ latency |

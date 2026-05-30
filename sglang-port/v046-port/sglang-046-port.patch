@@ -1,5 +1,5 @@
---- /tmp/sglang_v046_backup/srt/entrypoints/engine.py	2026-05-26 19:10:26.032386465 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/entrypoints/engine.py	2026-05-26 19:20:06.000000000 +0000
+--- a/srt/entrypoints/engine.py
++++ b/srt/entrypoints/engine.py
 @@ -131,6 +131,20 @@
          self.tokenizer_manager = tokenizer_manager
          self.scheduler_info = scheduler_info
@@ -46,9 +46,54 @@
      # Allocate ports for inter-process communications
      if port_args is None:
          port_args = PortArgs.init_new(server_args)
-diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or directory
---- /tmp/sglang_v046_backup/srt/managers/io_struct.py	2026-05-26 19:10:26.044386501 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/io_struct.py	2026-05-26 19:12:15.000000000 +0000
+--- a/srt/entrypoints/http_server.py
++++ b/srt/entrypoints/http_server.py
+@@ -157,6 +157,43 @@
+     return Response(status_code=200)
+ 
+ 
++# DeltaServe Section 11: /start_finetuning endpoint. When
++# `finetune.start_on_launch=False` (the default under co-serving), FT
++# admission is gated off at launch — profiling + warmup get a clean GPU.
++# Eval harnesses POST this AFTER warmup to open admission.
++@app.post("/start_finetuning")
++async def start_finetuning():
++    from sglang.srt.deltaserve import gates as _ds_gates
++    _ds_gates.set_finetuning_started(True)
++    return ORJSONResponse({"finetuning_started": True})
++
++
++@app.post("/stop_finetuning")
++async def stop_finetuning():
++    from sglang.srt.deltaserve import gates as _ds_gates
++    _ds_gates.set_finetuning_started(False)
++    return ORJSONResponse({"finetuning_started": False})
++
++
++@app.get("/finetuning_status")
++async def finetuning_status():
++    from sglang.srt.deltaserve import gates as _ds_gates
++    return ORJSONResponse({"finetuning_started": _ds_gates.is_finetuning_started()})
++
++
++@app.get("/finetune_stats")
++async def finetune_stats():
++    # Read stats from the shared file (the scheduler subprocess writes it
++    # after each faux backward fires).
++    import os, tempfile, json
++    path = os.path.join(tempfile.gettempdir(), "sglang_ds_gates", "faux_stats.json")
++    try:
++        with open(path) as f:
++            return ORJSONResponse(json.load(f))
++    except (FileNotFoundError, json.JSONDecodeError):
++        return ORJSONResponse({"backward_calls": 0, "backward_total_ms": 0.0})
++
++
+ @app.get("/health_generate")
+ async def health_generate(request: Request) -> Response:
+     """Check the health of the inference server by generating one token."""
+--- a/srt/managers/io_struct.py
++++ b/srt/managers/io_struct.py
 @@ -89,6 +89,8 @@
      modalities: Optional[List[str]] = None
      # LoRA related
@@ -67,8 +112,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
      # The input embeds
      input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
  
---- /tmp/sglang_v046_backup/srt/managers/scheduler.py	2026-05-26 19:10:26.052386525 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/scheduler.py	2026-05-26 23:09:32.000000000 +0000
+--- a/srt/managers/scheduler.py
++++ b/srt/managers/scheduler.py
 @@ -191,6 +191,22 @@
      ):
          # Parse args
@@ -146,8 +191,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          return ret
  
      def process_batch_result(
---- /tmp/sglang_v046_backup/srt/managers/schedule_batch.py	2026-05-26 19:10:26.060386547 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/schedule_batch.py	2026-05-26 21:43:31.000000000 +0000
+--- a/srt/managers/schedule_batch.py
++++ b/srt/managers/schedule_batch.py
 @@ -443,6 +443,9 @@
      ):
          # Input and output info
@@ -179,8 +224,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
      # The input Embeds
      input_embeds: Optional[torch.tensor] = None
  
---- /tmp/sglang_v046_backup/srt/managers/tokenizer_manager.py	2026-05-26 19:10:26.076386595 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/managers/tokenizer_manager.py	2026-05-26 19:12:24.000000000 +0000
+--- a/srt/managers/tokenizer_manager.py
++++ b/srt/managers/tokenizer_manager.py
 @@ -559,6 +559,7 @@
                  bootstrap_port=obj.bootstrap_port,
                  bootstrap_room=obj.bootstrap_room,
@@ -189,8 +234,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
                  input_embeds=input_embeds,
                  session_params=session_params,
                  custom_logit_processor=obj.custom_logit_processor,
---- /tmp/sglang_v046_backup/srt/mem_cache/paged_allocator.py	2026-05-26 19:10:26.084386617 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/mem_cache/paged_allocator.py	2026-05-26 19:16:27.000000000 +0000
+--- a/srt/mem_cache/paged_allocator.py
++++ b/srt/mem_cache/paged_allocator.py
 @@ -187,6 +187,18 @@
          self._kvcache = kvcache
          self.ret_values = torch.empty((), dtype=torch.int64, device=self.device)
@@ -210,8 +255,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
      def available_size(self):
          return len(self.free_pages) * self.page_size
  
---- /tmp/sglang_v046_backup/srt/model_executor/forward_batch_info.py	2026-05-26 19:10:26.100386665 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/forward_batch_info.py	2026-05-26 22:33:24.000000000 +0000
+--- a/srt/model_executor/forward_batch_info.py
++++ b/srt/model_executor/forward_batch_info.py
 @@ -252,6 +252,10 @@
      # For Qwen2-VL
      mrope_positions: torch.Tensor = None
@@ -253,8 +298,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          # For DP attention
          if batch.global_num_tokens is not None:
              ret.global_num_tokens_cpu = batch.global_num_tokens
---- /tmp/sglang_v046_backup/srt/model_executor/model_runner.py	2026-05-26 19:10:26.112386699 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/model_executor/model_runner.py	2026-05-27 09:52:33.000000000 +0000
+--- a/srt/model_executor/model_runner.py
++++ b/srt/model_executor/model_runner.py
 @@ -579,6 +579,41 @@
              f"mem usage={(before_avail_memory - after_avail_memory):.2f} GB."
          )
@@ -351,8 +396,8 @@ diff: /tmp/sglang_v046_backup/srt/entrypoints/http_server.py: No such file or di
          )
          if can_run_cuda_graph:
              ret = self.cuda_graph_runner.replay(
---- /tmp/sglang_v046_backup/srt/server_args.py	2026-05-26 19:10:26.128386745 +0000
-+++ /mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/sglang/srt/server_args.py	2026-05-26 19:11:57.000000000 +0000
+--- a/srt/server_args.py
++++ b/srt/server_args.py
 @@ -220,6 +220,11 @@
      disaggregation_ib_device: Optional[str] = None
      pdlb_url: Optional[str] = None
