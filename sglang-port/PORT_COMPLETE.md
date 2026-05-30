@@ -110,14 +110,14 @@ test_phase{1,3,4,5,6,7,8}.py
 
 ## Where the code lives
 
-- Live patches in `/tmp/sglang_work/sglang/` (a real sglang upstream
-  clone). Tests pass there.
-- Snapshot inside this repo at
-  `sglang-port/upstream-patches/`:
-  - `sglang-deltaserve-port.patch` — `git diff HEAD` against the
-    upstream clone (the 10-file modification set, 338 lines).
-  - `new-files/python/sglang/srt/...` — the new files mirrored from
-    the upstream clone.
+> **Note (superseded):** this Phase-1 snapshot originally lived under
+> `sglang-port/upstream-patches/`, which has been removed. The current,
+> benchmarked port is in [`sglang-port/v046-port/`](v046-port/):
+> - `v046-port/sglang-046-port.patch` — portable patch against stock
+>   `sglang==0.4.6.post5` (10 modified files).
+> - `v046-port/new-files/` — the new `deltaserve/` runtime + top-level files.
+> - `v046-port/vendor/` — the vendored sglang wheel.
+> - `v046-port/INSTALL.md` — one-command install.
 
 ## Process notes
 

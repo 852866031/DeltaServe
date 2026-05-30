@@ -2,5 +2,6 @@
 __pycache__/
 *.pyc
 # Optional upstream sglang checkout at the top of sglang-port/ — don't commit it.
-# Only matches sglang-port/sglang/, NOT the in-package sglang/ namespace under dserve-sglang/.
+# (The port is installed via v046-port/install.sh against a stock sglang, not a
+# vendored source checkout.)
 /sglang/
